@@ -1,0 +1,49 @@
+[project]
+name = "track-insight"
+version = "0.1.0"
+description = "政策与行业信号监测及赛道洞察 POC"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "alembic>=1.14,<2",
+    "beautifulsoup4>=4.13,<5",
+    "psycopg[binary]>=3.2,<4",
+    "pypdf>=6.0,<7",
+    "pydantic-settings>=2.7,<3",
+    "pyyaml>=6.0,<7",
+    "sqlalchemy>=2.0,<3",
+    "truststore>=0.10,<1",
+    "typer>=0.15,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-cov>=6,<8",
+    "ruff>=0.9,<1",
+]
+
+[project.scripts]
+track-insight = "track_insight.cli:app"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/track_insight"]
+
+[tool.pytest.ini_options]
+addopts = "-q -p no:cacheprovider -p no:tmpdir"
+testpaths = ["tests"]
+markers = [
+    "integration: requires a running PostgreSQL database",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = [".runtime-tests", ".test-tmp", ".uv-cache", ".venv", "data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

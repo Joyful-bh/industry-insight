@@ -1,0 +1,212 @@
+- code: gov_policy_library
+  name: 国务院政策文件库
+  publisher: 中国政府网
+  source_level: central
+  source_type: government_policy
+  regions: [CN]
+  content_types: [policy_measure, application_program, recognition_result]
+  entry_urls:
+    - https://www.gov.cn/zhengce/zhengceku/bmwj/home.htm
+    - https://www.gov.cn/zhengce/zhengceku/gwywj/home.htm
+  adapter_key: gov_policy_library
+  schedule: daily
+
+- code: ndrc_policy
+  name: 国家发展改革委政策发布
+  publisher: 国家发展和改革委员会
+  source_level: central
+  source_type: government_department
+  regions: [CN]
+  content_types: [policy_measure, application_program, project_progress]
+  entry_urls:
+    - https://www.ndrc.gov.cn/xwdt/tzgg/
+    - https://www.ndrc.gov.cn/xxgk/zcfb/tz/wap_index.html
+  adapter_key: generic_html_list
+  schedule: daily
+
+- code: miit_policy
+  name: 工业和信息化部政务公开
+  publisher: 工业和信息化部
+  source_level: central
+  source_type: government_department
+  regions: [CN]
+  content_types: [policy_measure, application_program, recognition_result, standard_release]
+  entry_urls:
+    - https://www.miit.gov.cn/zwgk/index.html
+    - https://www.miit.gov.cn/gyhxxhbwjcx/
+  adapter_key: generic_html_list
+  schedule: daily
+
+- code: most_public
+  name: 科技部政府信息公开
+  publisher: 科学技术部
+  source_level: central
+  source_type: government_department
+  regions: [CN]
+  content_types: [policy_measure, application_program, recognition_result]
+  entry_urls:
+    - https://www.most.gov.cn/xxgk/xinxifenlei/fdzdgknr/
+    - https://fuwu.most.gov.cn/html/tztg/
+  adapter_key: generic_html_list
+  schedule: daily
+
+- code: mof_policy
+  name: 财政部政策发布
+  publisher: 财政部
+  source_level: central
+  source_type: government_department
+  regions: [CN]
+  content_types: [policy_measure, application_program, recognition_result]
+  entry_urls:
+    - https://www.mof.gov.cn/zhengwuxinxi/
+    - https://www.mof.gov.cn/gkml/bulinggonggao/
+  adapter_key: generic_html_list
+  schedule: daily
+  enabled: false
+
+- code: beijing_policy
+  name: 北京市政策文件库
+  publisher: 北京市人民政府
+  source_level: local
+  source_type: government_policy
+  regions: [CN-11]
+  content_types: [policy_measure, application_program, recognition_result, project_progress]
+  entry_urls:
+    - https://www.beijing.gov.cn/zhengce/zhengcefagui/index.html
+  adapter_key: beijing_policy
+  schedule: daily
+
+- code: beijing_ndrc
+  name: 北京市发展改革委政策与通知
+  publisher: 北京市发展和改革委员会
+  source_level: local
+  source_type: government_department
+  regions: [CN-11]
+  content_types: [policy_measure, application_program, project_progress]
+  entry_urls:
+    - https://fgw.beijing.gov.cn/fgwzwgk/2024zcwj/
+    - https://fgw.beijing.gov.cn/gzdt/tztg/
+  adapter_key: generic_html_list
+  schedule: daily
+
+- code: beijing_miit
+  name: 北京市经济和信息化局
+  publisher: 北京市经济和信息化局
+  source_level: local
+  source_type: government_department
+  regions: [CN-11]
+  content_types: [policy_measure, application_program, recognition_result, project_progress]
+  entry_urls:
+    - https://jxj.beijing.gov.cn/jxdt/tzgg/
+  adapter_key: generic_html_list
+  schedule: daily
+
+- code: beijing_science
+  name: 北京市科委、中关村管委会
+  publisher: 北京市科学技术委员会、中关村科技园区管理委员会
+  source_level: local
+  source_type: government_department
+  regions: [CN-11]
+  content_types: [policy_measure, application_program, recognition_result, project_progress]
+  entry_urls:
+    - https://kw.beijing.gov.cn/zwgk/zwgksbrl/
+  adapter_key: generic_html_list
+  schedule: daily
+
+- code: beijing_sme_service
+  name: 北京市中小企业公共服务平台
+  publisher: 北京市中小企业服务中心
+  source_level: local
+  source_type: sme_public_service
+  regions: [CN-11]
+  content_types: [policy_measure, application_program, recognition_result, business_operation]
+  entry_urls:
+    - https://www.smebj.cn/policy/policy1.html
+    - https://www.smebj.cn/activity/activity1.html
+    - https://www.smebj.cn/report/report1.html
+    - https://www.smebj.cn/news/news1.html
+  adapter_key: beijing_sme_service
+  schedule: daily
+  rate_limit: {requests_per_second: 0.2}
+
+- code: beijing_finance
+  name: 北京市财政局政策文件
+  publisher: 北京市财政局
+  source_level: local
+  source_type: government_department
+  regions: [CN-11]
+  content_types: [policy_measure, application_program, procurement_activity]
+  entry_urls:
+    - https://czj.beijing.gov.cn/zwxx/2024zcwj/index.html
+  adapter_key: generic_html_list
+  schedule: daily
+  enabled: false
+
+- code: ccgp_national
+  name: 中国政府采购网
+  publisher: 财政部
+  source_level: central
+  source_type: government_procurement
+  regions: [CN, CN-11]
+  content_types: [procurement_activity]
+  entry_urls:
+    - https://www.ccgp.gov.cn/
+    - https://cgyx.ccgp.gov.cn/cgyx/pub/projSearch
+  adapter_key: ccgp
+  schedule: daily
+  rate_limit: {requests_per_second: 0.3}
+  enabled: false
+
+- code: ccgp_beijing
+  name: 北京市政府采购网
+  publisher: 北京市财政局
+  source_level: local
+  source_type: government_procurement
+  regions: [CN-11]
+  content_types: [procurement_activity]
+  entry_urls:
+    - http://www.ccgp-beijing.gov.cn/
+  adapter_key: ccgp_beijing
+  schedule: daily
+  rate_limit: {requests_per_second: 0.3}
+  enabled: false
+
+- code: beijing_public_resources
+  name: 北京市公共资源交易服务平台
+  publisher: 北京市发展和改革委员会
+  source_level: local
+  source_type: public_resource_exchange
+  regions: [CN-11]
+  content_types: [procurement_activity, project_progress]
+  entry_urls:
+    - https://ggzyfw.beijing.gov.cn/jyxxggjtbyqs/index.html
+  adapter_key: beijing_public_resources
+  schedule: daily
+  rate_limit: {requests_per_second: 0.3}
+  enabled: false
+
+- code: stats_national
+  name: 国家统计局数据发布
+  publisher: 国家统计局
+  source_level: central
+  source_type: statistics
+  regions: [CN]
+  content_types: [statistical_observation]
+  entry_urls:
+    - https://www.stats.gov.cn/sj/zxfb/index.html
+  adapter_key: stats_national
+  schedule: weekly
+  enabled: false
+
+- code: stats_beijing
+  name: 北京市统计局统计数据
+  publisher: 北京市统计局、国家统计局北京调查总队
+  source_level: local
+  source_type: statistics
+  regions: [CN-11]
+  content_types: [statistical_observation]
+  entry_urls:
+    - https://tjj.beijing.gov.cn/tjsj_31433/tjgb_31445/
+  adapter_key: generic_html_list
+  schedule: weekly
+  enabled: false

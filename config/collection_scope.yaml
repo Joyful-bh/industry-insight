@@ -1,0 +1,48 @@
+version: beijing-poc-v1
+target_regions:
+  - code: CN-11
+    name: 北京市
+backfill_months: 24
+document_formats:
+  - html
+  - pdf
+publish_time_semantics: published_at
+discovery:
+  search_enabled: false
+  search_provider: null
+  enterprise_site_discovery: true
+  require_original_source: true
+relevance_prefilter:
+  mode: tag_only
+  title_keywords:
+    - 中小企业
+    - 小微企业
+    - 民营企业
+    - 专精特新
+    - 企业
+    - 产业
+    - 制造业
+    - 工业
+    - 科技
+    - 创新
+    - 数字化
+    - 数字经济
+    - 人工智能
+    - 数据
+    - 软件
+    - 信息化
+    - 园区
+    - 集群
+    - 项目
+    - 应用场景
+    - 设备更新
+    - 招商
+    - 投资
+    - 融资
+    - 采购
+    - 标准
+    - 能源
+    - 绿色
+    - 医药
+    - 商业
+    - 服务业
