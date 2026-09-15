@@ -3,12 +3,12 @@ import urllib.error
 import urllib.request
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from track_insight.enums import RelevanceLabel
 from track_insight.relevance import RelevanceResult
 
-PROMPT_VERSION = "relevance-semantic-v1"
+PROMPT_VERSION = "relevance-semantic-v10-manufacturing"
 
 
 class LlmClassificationError(RuntimeError):
@@ -24,6 +24,16 @@ class SemanticRelevanceOutput(BaseModel):
     industries: list[str] = Field(default_factory=list, max_length=12)
     reason: str = Field(min_length=5, max_length=500)
     evidence: list[str] = Field(default_factory=list, max_length=3)
+
+    @field_validator("signal_types", "industries", mode="before")
+    @classmethod
+    def truncate_taxonomies(cls, value: object) -> object:
+        return value[:12] if isinstance(value, list) else value
+
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def truncate_evidence(cls, value: object) -> object:
+        return value[:3] if isinstance(value, list) else value
 
 
 class LlmClient:
@@ -54,7 +64,9 @@ class LlmClient:
         source_text = text[: self.max_input_chars]
         payload = {
             "model": self.model,
-            "temperature": 0,
+            "temperature": 0.6,
+            "max_tokens": 800,
+            "thinking": {"type": "disabled"},
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": _system_prompt()},
@@ -93,8 +105,25 @@ class LlmClient:
                 response_payload = json.loads(response.read())
         except urllib.error.HTTPError as error:
             retryable = error.code == 429 or error.code >= 500
+            try:
+                detail = error.read().decode("utf-8", errors="replace")[:500]
+            except OSError:
+                detail = ""
+            if self.api_key:
+                detail = detail.replace(self.api_key, "[redacted]")
+            if error.code == 400 and "content_filter" in detail:
+                return RelevanceResult(
+                    label=RelevanceLabel.POSSIBLY_RELEVANT,
+                    score=min(rule_result.score, 0.49),
+                    signal_types=rule_result.signal_types,
+                    industries=rule_result.industries,
+                    matched_positive_rules=rule_result.matched_positive_rules,
+                    matched_negative_rules=rule_result.matched_negative_rules,
+                    reason="模型服务拒绝处理该正文，保留规则结果供人工复核。",
+                    evidence=rule_result.evidence,
+                )
             raise LlmClassificationError(
-                f"LLM HTTP {error.code}", retryable=retryable
+                f"LLM HTTP {error.code}: {detail or 'no response body'}", retryable=retryable
             ) from error
         except (urllib.error.URLError, TimeoutError) as error:
             raise LlmClassificationError(f"LLM request failed: {error}", retryable=True) from error
@@ -126,11 +155,17 @@ def _validate_response(payload: dict, source_text: str) -> SemanticRelevanceOutp
         output = SemanticRelevanceOutput.model_validate_json(cleaned)
     except (KeyError, IndexError, TypeError, ValidationError, json.JSONDecodeError) as error:
         raise LlmClassificationError(f"invalid structured LLM response: {error}") from error
-    if output.label != "possibly_relevant" and not output.evidence:
-        raise LlmClassificationError("decisive LLM result must contain evidence")
-    if any(evidence not in source_text for evidence in output.evidence):
-        raise LlmClassificationError("LLM evidence is not an exact excerpt from the document")
-    return output
+    valid_evidence = [evidence for evidence in output.evidence if evidence in source_text]
+    if output.label != "possibly_relevant" and not valid_evidence:
+        return output.model_copy(
+            update={
+                "label": "possibly_relevant",
+                "score": min(output.score, 0.49),
+                "reason": f"{output.reason[:450]}（证据未通过逐字校验，结果已降级。）",
+                "evidence": [],
+            }
+        )
+    return output.model_copy(update={"evidence": valid_evidence})
 
 
 def _completion_endpoint(base_url: str) -> str:
@@ -140,9 +175,17 @@ def _completion_endpoint(base_url: str) -> str:
 
 def _system_prompt() -> str:
     return (
-        "你负责判断材料是否包含可形成政策、产业、项目、企业经营或市场变化事件的信息。"
-        "不要要求正文必须出现中小企业。relevant表示存在明确事件及产业或经营意义；"
-        "irrelevant表示明确属于普通政务、民生、人事、网站内容且没有产业事件；"
-        "无法确定时使用possibly_relevant。只返回JSON对象，字段必须为label、score、"
-        "signal_types、industries、reason、evidence。evidence最多3条且必须逐字摘自输入正文。"
+        "你负责筛选可用于发现北京制造业赛道变化的材料。只依据输入正文，不补充外部事实。"
+        "关注制造业政策、申报认定、项目签约开工投产扩产、技术产业化、产业链供需、"
+        "企业融资并购、产能订单价格等市场变化，以及明确适用于制造业中小企业的通用扶持政策。"
+        "纯软件或互联网服务、金融产品宣传、文化旅游、居民生活、党建人事、会议过程、"
+        "机构职能和无产业事实的活动报道判为irrelevant。"
+        "relevant要求正文同时包含明确发生的事件，以及具体制造业对象、制造环节，或可执行的"
+        "制造业中小企业支持条件。只有方向性表述、对象或事件不清时判为possibly_relevant。"
+        "返回且仅返回一个JSON对象，字段必须完整且不得增加字段："
+        '{"label":"relevant|possibly_relevant|irrelevant","score":0到1的小数,'
+        '"signal_types":[],"industries":[],"reason":"简洁中文理由","evidence":[]}。'
+        "signal_types使用英文蛇形命名；industries填写正文明确支持的具体制造业领域。"
+        "relevant和irrelevant必须提供1至3条evidence；每条必须是输入text中连续、逐字一致的短摘录，"
+        "不得改写，不得引用title或rule_assessment。possibly_relevant可不提供证据。"
     )

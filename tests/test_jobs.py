@@ -120,3 +120,32 @@ def test_claim_job_can_filter_job_type() -> None:
         claimed = claim_job(session, "worker-1", job_type="document_parse")
 
         assert claimed is parse_job
+
+
+def test_claim_job_can_filter_processor_version() -> None:
+    with make_session() as session:
+        enqueue_job(
+            session,
+            job_type="document_parse",
+            object_type="document_version",
+            object_id="1",
+            input_fingerprint="old",
+            processor_version="v1",
+        )
+        current_job = enqueue_job(
+            session,
+            job_type="document_parse",
+            object_type="document_version",
+            object_id="2",
+            input_fingerprint="current",
+            processor_version="v2",
+        )
+
+        claimed = claim_job(
+            session,
+            "worker-1",
+            job_type="document_parse",
+            processor_version="v2",
+        )
+
+        assert claimed is current_job

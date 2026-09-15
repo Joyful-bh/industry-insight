@@ -57,7 +57,11 @@ def enqueue_job(
     return job
 
 
-def _claim_query(now: datetime, job_type: str | None = None) -> Select[tuple[Job]]:
+def _claim_query(
+    now: datetime,
+    job_type: str | None = None,
+    processor_version: str | None = None,
+) -> Select[tuple[Job]]:
     query = (
         select(Job)
         .where(
@@ -71,6 +75,8 @@ def _claim_query(now: datetime, job_type: str | None = None) -> Select[tuple[Job
     )
     if job_type is not None:
         query = query.where(Job.job_type == job_type)
+    if processor_version is not None:
+        query = query.where(Job.processor_version == processor_version)
     return query
 
 
@@ -79,9 +85,10 @@ def claim_job(
     worker_id: str,
     lease_seconds: int = 300,
     job_type: str | None = None,
+    processor_version: str | None = None,
 ) -> Job | None:
     now = datetime.now(UTC)
-    job = session.scalar(_claim_query(now, job_type))
+    job = session.scalar(_claim_query(now, job_type, processor_version))
     if job is None:
         return None
     job.status = JobStatus.RUNNING

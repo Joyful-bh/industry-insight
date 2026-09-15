@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from track_insight.document_parser import normalize_text, parse_html
+from track_insight.document_parser import normalize_text, parse_html, parse_pdf
 
 
 def test_html_parser_extracts_main_content_and_metadata() -> None:
@@ -73,3 +73,33 @@ def test_html_parser_removes_inline_controls_but_keeps_normal_share_word() -> No
     assert "字体：" not in result.text
     assert "分享：X" not in result.text
     assert "分享了数字化改造经验" in result.text
+
+
+def test_html_parser_treats_bodyless_fragment_as_partial_content() -> None:
+    result = parse_html(b"<title>fragment</title><p>short text</p>")
+
+    assert result.text == "fragment short text"
+    assert result.warnings == ["insufficient_text"]
+
+
+def test_pdf_parser_treats_invalid_file_as_partial_content() -> None:
+    result = parse_pdf(b"not a PDF")
+
+    assert result.text == ""
+    assert "invalid_pdf" in result.warnings
+
+
+def test_html_parser_falls_back_to_body_when_declared_main_is_empty() -> None:
+    html = """
+    <html><head><title>制造业项目动态</title></head><body>
+      <main></main>
+      <div class="page-detail">
+        <h1>制造业项目动态</h1>
+        <p>某制造企业建设智能生产线，形成新的工业软件、边缘计算和设备运维需求。</p>
+      </div>
+    </body></html>
+    """.encode()
+
+    result = parse_html(html)
+
+    assert "建设智能生产线" in result.text

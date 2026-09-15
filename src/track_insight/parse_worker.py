@@ -62,6 +62,7 @@ def run_parse_jobs(
                 identity,
                 lease_seconds=settings.job_lease_seconds,
                 job_type="document_parse",
+                processor_version=PARSER_VERSION,
             )
             if job is None:
                 break

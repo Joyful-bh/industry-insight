@@ -11,7 +11,7 @@ from track_insight.database import session_scope
 from track_insight.enums import ParseStatus
 from track_insight.jobs import claim_job, complete_job, enqueue_job, fail_job
 from track_insight.llm_client import PROMPT_VERSION, LlmClassificationError, LlmClient
-from track_insight.models import DocumentRelevanceAssessment, DocumentVersion
+from track_insight.models import Document, DocumentRelevanceAssessment, DocumentVersion, Source
 from track_insight.relevance import classify_relevance, load_relevance_rules
 
 
@@ -34,8 +34,11 @@ def enqueue_relevance_jobs(
     with session_scope() as session:
         versions = session.scalars(
             select(DocumentVersion)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .join(Source, Source.id == Document.source_id)
             .where(
                 DocumentVersion.parse_status == ParseStatus.SUCCEEDED,
+                Source.enabled.is_(True),
                 ~exists().where(
                     DocumentRelevanceAssessment.document_version_id == DocumentVersion.id,
                     DocumentRelevanceAssessment.classifier_version == classifier_version,
@@ -73,7 +76,11 @@ def run_relevance_jobs(
     for _ in range(limit):
         with session_scope() as session:
             job = claim_job(
-                session, identity, lease_seconds=lease_seconds, job_type="document_relevance"
+                session,
+                identity,
+                lease_seconds=lease_seconds,
+                job_type="document_relevance",
+                processor_version=classifier_version,
             )
             if job is None:
                 break
@@ -141,7 +148,13 @@ def _classifier_version(rules_fingerprint: str, settings: Settings) -> str:
     if not settings.llm_enabled():
         return rules_fingerprint
     identity = "\x1f".join(
-        (rules_fingerprint, PROMPT_VERSION, settings.llm_base_url or "", settings.llm_model or "")
+        (
+            rules_fingerprint,
+            PROMPT_VERSION,
+            "enabled-sources-only-v1",
+            settings.llm_base_url or "",
+            settings.llm_model or "",
+        )
     )
     return hashlib.sha256(identity.encode()).hexdigest()
 

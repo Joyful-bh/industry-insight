@@ -1,7 +1,7 @@
 import hashlib
 import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from io import BytesIO
 
@@ -13,18 +13,23 @@ from track_insight.blobstore import LocalBlobStore
 from track_insight.enums import ParseStatus
 from track_insight.models import DocumentVersion
 
-PARSER_VERSION = "document-parser-v6"
+PARSER_VERSION = "document-parser-v11"
 MIN_USEFUL_TEXT_LENGTH = 80
 CONTENT_SELECTORS = (
     "article",
     "main",
     "#UCAP-CONTENT",
     ".TRS_Editor",
+    ".TRS_UEDITOR",
     ".txt-content",
     "#mainText",
     ".mainTextBox",
     ".article-content",
     ".article_content",
+    "#rm_txt_zw",
+    ".content-box",
+    ".detail-content",
+    ".news-content",
     "#zoom",
 )
 BOILERPLATE_SELECTORS = (
@@ -61,6 +66,9 @@ TRAILING_BOILERPLATE_MARKERS = (
     "版权声明",
     "免责声明",
     "版权所有",
+    "更多热点速报、权威资讯、深度分析尽在北京日报App",
+    "【关闭页面】",
+    "中国政府网及国务院部门网站",
 )
 INLINE_CONTROL_PATTERNS = (
     re.compile(
@@ -109,28 +117,33 @@ class DocumentParser:
                 f"unsupported document type: {version.content_type}", code="unsupported_type"
             )
 
-        if len(parsed.text) < MIN_USEFUL_TEXT_LENGTH:
-            version.parse_status = ParseStatus.PARTIAL
-            version.parser_version = self.parser_version
-            version.parse_quality = parsed.quality
-            version.metadata_json = _merge_parse_metadata(version.metadata_json, parsed)
-            raise DocumentParseError(
-                "document contains too little extractable text; "
-                "OCR or manual review may be required",
-                code="insufficient_text",
+        current_title = _clean_title(version.title)
+        parsed_title = _clean_title(parsed.title)
+        if parsed_title and (not current_title or _is_noisy_title(version.title)):
+            current_title = parsed_title
+        cleaned_text = _remove_leading_navigation(parsed.text, current_title)
+        if cleaned_text != parsed.text:
+            parsed = replace(
+                parsed,
+                text=cleaned_text,
+                quality=_quality_score(cleaned_text, has_title=bool(current_title)),
             )
 
         version.normalized_text = parsed.text
-        version.body_sha256 = hashlib.sha256(parsed.text.encode("utf-8")).hexdigest()
-        version.simhash = _simhash(parsed.text)
+        if parsed.text:
+            version.body_sha256 = hashlib.sha256(parsed.text.encode("utf-8")).hexdigest()
+            version.simhash = _simhash(parsed.text)
         version.parse_quality = parsed.quality
         version.parser_version = self.parser_version
-        version.parse_status = ParseStatus.SUCCEEDED
+        version.parse_status = (
+            ParseStatus.SUCCEEDED
+            if len(parsed.text) >= MIN_USEFUL_TEXT_LENGTH
+            else ParseStatus.PARTIAL
+        )
         version.metadata_json = _merge_parse_metadata(version.metadata_json, parsed)
-        if parsed.title and not version.title:
-            version.title = parsed.title
-        if parsed.title and not version.document.title:
-            version.document.title = parsed.title
+        if current_title:
+            version.title = current_title
+            version.document.title = current_title
         if parsed.published_at and not version.published_at:
             version.published_at = parsed.published_at
         if parsed.document_number and not version.document_number:
@@ -159,7 +172,9 @@ def parse_html(content: bytes) -> ParsedDocument:
     candidates = [node for selector in CONTENT_SELECTORS for node in soup.select(selector)]
     root = max(candidates, key=lambda node: len(node.get_text(" ", strip=True)), default=soup.body)
     if root is None:
-        raise DocumentParseError("HTML has no body", code="invalid_html")
+        root = soup
+    if len(root.get_text(" ", strip=True)) < MIN_USEFUL_TEXT_LENGTH and soup.body is not None:
+        root = soup.body
     text = normalize_inline(root.get_text(" ", strip=True))
     title_node = soup.find("h1") or soup.find("title")
     title = normalize_inline(title_node.get_text(" ", strip=True)) if title_node else None
@@ -176,17 +191,33 @@ def parse_html(content: bytes) -> ParsedDocument:
         published_at=published_at,
         document_number=document_number,
         quality=quality,
+        warnings=[] if len(text) >= MIN_USEFUL_TEXT_LENGTH else ["insufficient_text"],
     )
 
 
 def parse_pdf(content: bytes) -> ParsedDocument:
+    warnings: list[str] = []
     try:
-        reader = PdfReader(BytesIO(content))
-        pages = [page.extract_text() or "" for page in reader.pages]
+        reader = PdfReader(BytesIO(content), strict=False)
     except Exception as error:
-        raise DocumentParseError(f"cannot read PDF: {error}", code="invalid_pdf") from error
+        return ParsedDocument(
+            text="",
+            quality=0.0,
+            warnings=["invalid_pdf", f"pdf_reader_error:{type(error).__name__}"],
+        )
+
+    pages: list[str] = []
+    for page in reader.pages:
+        try:
+            pages.append(page.extract_text() or "")
+        except Exception as error:
+            pages.append("")
+            warning = f"pdf_page_error:{type(error).__name__}"
+            if warning not in warnings:
+                warnings.append(warning)
     text = normalize_text("\n\n".join(pages))
-    warnings = [] if text else ["no_extractable_text"]
+    if len(text) < MIN_USEFUL_TEXT_LENGTH:
+        warnings.append("insufficient_text")
     return ParsedDocument(
         text=text,
         published_at=_extract_published_at(text),
@@ -220,14 +251,14 @@ def _remove_leading_navigation(text: str, title: str | None) -> str:
     if not title:
         return text
     position = text.find(title)
-    if 0 < position < 500:
+    if 0 < position < 2500:
         return text[position:]
     return text
 
 
 def _trim_trailing_boilerplate(text: str) -> str:
     cutoff = len(text)
-    searchable_start = max(20, int(len(text) * 0.6))
+    searchable_start = 20
     for marker in TRAILING_BOILERPLATE_MARKERS:
         position = text.find(marker, searchable_start)
         if position >= 0:
@@ -243,6 +274,22 @@ def _remove_inline_controls(text: str) -> str:
 
 def _remove_unsupported_control_characters(value: str) -> str:
     return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", value)
+
+
+def _clean_title(value: str | None) -> str | None:
+    if not value:
+        return None
+    title = normalize_inline(value)
+    title = re.sub(r"^显示\s*\[[^]]+\]\s*", "", title)
+    title = re.sub(r"\s+20\d{2}-\d{2}-\d{2}$", "", title)
+    return title or None
+
+
+def _is_noisy_title(value: str | None) -> bool:
+    return bool(
+        value
+        and (value.startswith("显示 [") or re.search(r"\s20\d{2}-\d{2}-\d{2}$", value))
+    )
 
 
 def _extract_published_at(text: str) -> datetime | None:

@@ -58,7 +58,7 @@ def classify_relevance(title: str | None, text: str, rules: RelevanceRules) -> R
         label = RelevanceLabel.IRRELEVANT
         score = 0.95
         reason = "标题命中高置信无关类型，且没有发现产业事件信号。"
-    elif signals and (industries or len(signal_types) >= 2):
+    elif signals and industries:
         label = RelevanceLabel.RELEVANT
         score = min(0.98, 0.78 + 0.05 * len(signal_types) + 0.03 * len(industry_names))
         reason = "同时发现明确事件信号和产业语义，可进入事件抽取。"
