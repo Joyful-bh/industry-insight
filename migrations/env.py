@@ -3,8 +3,8 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from track_insight.config import get_settings
-from track_insight.models import Base
+from track_insight.infrastructure.models import Base
+from track_insight.settings import get_settings
 
 config = context.config
 config.set_main_option("sqlalchemy.url", get_settings().database_url)
