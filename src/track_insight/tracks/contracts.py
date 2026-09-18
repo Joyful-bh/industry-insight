@@ -1,8 +1,7 @@
+import uuid
 from typing import Literal
 
 from pydantic import BaseModel, Field
-
-import uuid
 
 
 class CandidateTrackOutput(BaseModel):
@@ -15,6 +14,15 @@ class CandidateTrackOutput(BaseModel):
 
 class TrackBuildOutput(BaseModel):
     tracks: list[CandidateTrackOutput] = Field(default_factory=list)
+
+
+class CompactCandidateTrackOutput(BaseModel):
+    name: str = Field(min_length=2, max_length=300)
+    refs: list[str] = Field(min_length=1)
+
+
+class CompactTrackBuildOutput(BaseModel):
+    tracks: list[CompactCandidateTrackOutput] = Field(default_factory=list)
 
 
 class ActivityAssessment(BaseModel):

@@ -90,18 +90,14 @@ class Stage2Config(BaseModel):
 
 class Stage3PromptConfig(BaseModel):
     topic_generation: Path
-    topic_reconciliation: Path
 
 
 class Stage3Config(BaseModel):
     model: str = "qwen3.7-flash"
     event_batch_size: int = Field(default=10, ge=1, le=100)
     max_events_per_run: int = Field(default=200, ge=1, le=1000)
-    max_topics_per_event: int = Field(default=3, ge=1, le=5)
     minimum_event_confidence: float = Field(default=0.70, ge=0, le=1)
     generation_max_output_tokens: int = Field(default=8192, ge=512, le=32_768)
-    reconciliation_batch_size: int = Field(default=12, ge=2, le=25)
-    reconciliation_max_output_tokens: int = Field(default=16384, ge=512, le=32_768)
     prompts: Stage3PromptConfig
 
 

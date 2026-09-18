@@ -9,7 +9,7 @@ bailian:
   model: qwen3.7-flash
   search_max_output_tokens: 8192
   review_batch_size: 10
-  timeout_seconds: 120
+  timeout_seconds: 300
   max_retries: 2
   max_concurrency: 4
 budgets:
@@ -45,16 +45,12 @@ stage2:
     event_extraction: config/prompts/event_extraction_v2.md
 stage3:
   model: qwen3.7-flash
-  event_batch_size: 10
-  max_events_per_run: 200
-  max_topics_per_event: 3
+  event_batch_size: 20
+  max_events_per_run: 1000
   minimum_event_confidence: 0.70
   generation_max_output_tokens: 8192
-  reconciliation_batch_size: 12
-  reconciliation_max_output_tokens: 16384
   prompts:
     topic_generation: config/prompts/topic_generation_v1.md
-    topic_reconciliation: config/prompts/topic_reconciliation_v1.md
 stage4:
   model: qwen3.7-flash
   minimum_supporting_events: 1

@@ -1,12 +1,51 @@
 import uuid
 
 from track_insight.settings import load_poc_config
-from track_insight.tracks.contracts import TrackAnalysisOutput, TrackBuildOutput
+from track_insight.tracks.contracts import (
+    CompactTrackBuildOutput,
+    TrackAnalysisOutput,
+    TrackBuildOutput,
+)
 from track_insight.tracks.service import (
+    _compact_text,
     _event_ids_for_topic_ids,
+    _expand_topic_refs,
     _normalize_build_output,
     _validate_build,
 )
+
+
+def test_compact_track_refs_expand_to_topic_ids() -> None:
+    first_id = uuid.uuid4()
+    second_id = uuid.uuid4()
+    compact = CompactTrackBuildOutput.model_validate(
+        {
+            "tracks": [
+                {
+                    "name": "工业视觉质检",
+                    "refs": ["T1", "T2", "T1", "UNKNOWN"],
+                }
+            ]
+        }
+    )
+
+    topics = {
+        first_id: type("Topic", (), {"definition": "工业视觉检测设备企业集合。"})(),
+        second_id: type("Topic", (), {"definition": "工业视觉检测软件企业集合。"})(),
+    }
+    session = _CapturingSession([uuid.uuid4(), uuid.uuid4()])
+    expanded = _expand_topic_refs(
+        session, compact, {"T1": first_id, "T2": second_id}, topics
+    )
+
+    assert expanded.tracks[0].topic_ids == [first_id, second_id]
+    assert expanded.tracks[0].status == "candidate"
+    assert expanded.tracks[0].definition.startswith("围绕工业视觉质检")
+
+
+def test_track_input_text_is_compact_and_readable() -> None:
+    assert _compact_text("  智能\n  算力平台  ", 20) == "智能 算力平台"
+    assert _compact_text("甲乙丙丁戊", 4) == "甲乙丙…"
 
 
 class _Topic:

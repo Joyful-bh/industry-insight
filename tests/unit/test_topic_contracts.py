@@ -3,18 +3,16 @@ import uuid
 import pytest
 from pydantic import ValidationError
 
-from track_insight.core.errors import ContractError
-from track_insight.settings import load_poc_config
 from track_insight.topics.contracts import TopicGenerationOutput
-from track_insight.topics.service import _validate_generation
+from track_insight.topics.service import _sanitize_generation
 
 
-def _candidate(event_id: uuid.UUID, candidate_key: str = "robot_park") -> dict:
+def _candidate(event_id: uuid.UUID, candidate_key: str = "robot") -> dict:
     return {
         "candidate_key": candidate_key,
-        "label": "机器人产业园建设",
-        "definition": "围绕机器人企业集聚形成的产业园建设与运营活动。",
-        "summary": "相关事件反映机器人产业园建设和企业集聚信号。",
+        "label": "具身智能机器人",
+        "definition": "从事具身智能机器人整机研发、制造与应用的企业活动。",
+        "summary": "近期事实显示具身智能机器人研发和产业化活动增加。",
         "event_ids": [str(event_id)],
         "confidence": 0.9,
     }
@@ -23,22 +21,31 @@ def _candidate(event_id: uuid.UUID, candidate_key: str = "robot_park") -> dict:
 def test_generation_contract_uses_event_ids_as_single_source_of_truth() -> None:
     event_id = uuid.uuid4()
     output = TopicGenerationOutput.model_validate({"candidates": [_candidate(event_id)]})
-    _validate_generation(output, {event_id}, load_poc_config())
+    assert _sanitize_generation(output, {event_id}) == 0
 
 
-def test_generation_contract_accepts_unassigned_events_implicitly() -> None:
-    event_id = uuid.uuid4()
+def test_generation_contract_accepts_empty_result() -> None:
     output = TopicGenerationOutput.model_validate({"candidates": []})
-    _validate_generation(output, {event_id}, load_poc_config())
+    assert _sanitize_generation(output, {uuid.uuid4()}) == 0
 
 
-def test_generation_validation_rejects_unknown_event_membership() -> None:
-    input_event_id = uuid.uuid4()
+def test_generation_sanitizer_drops_only_unknown_memberships() -> None:
+    known = uuid.uuid4()
+    unknown = uuid.uuid4()
+    candidate = _candidate(known)
+    candidate["event_ids"].append(str(unknown))
+    output = TopicGenerationOutput.model_validate({"candidates": [candidate]})
+
+    assert _sanitize_generation(output, {known}) == 1
+    assert output.candidates[0].event_ids == [known]
+
+
+def test_generation_sanitizer_drops_candidate_without_valid_event() -> None:
     output = TopicGenerationOutput.model_validate(
         {"candidates": [_candidate(uuid.uuid4())]}
     )
-    with pytest.raises(ContractError, match="unknown event"):
-        _validate_generation(output, {input_event_id}, load_poc_config())
+    assert _sanitize_generation(output, {uuid.uuid4()}) == 1
+    assert output.candidates == []
 
 
 def test_generation_contract_rejects_duplicate_candidate_keys() -> None:

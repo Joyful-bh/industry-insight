@@ -29,10 +29,15 @@ from track_insight.infrastructure.models import (
     UrlCandidate,
 )
 from track_insight.settings import PocConfig
-from track_insight.tracks.contracts import TrackAnalysisOutput, TrackBuildOutput, TrackStatus
+from track_insight.tracks.contracts import (
+    CompactTrackBuildOutput,
+    TrackAnalysisOutput,
+    TrackBuildOutput,
+    TrackStatus,
+)
 
-TRACK_PROCESSOR_VERSION = "topic-track-v6-direct"
-ANALYSIS_PROCESSOR_VERSION = "track-analysis-v3"
+TRACK_PROCESSOR_VERSION = "topic-track-v7-short-refs"
+ANALYSIS_PROCESSOR_VERSION = "track-analysis-v4-snapshotted-events"
 
 NON_TRACK_IDENTITY_TERMS = (
     "政策支持",
@@ -148,21 +153,33 @@ class TrackService:
         )
         session.commit()
         try:
+            topic_refs = {f"T{index}": topic.id for index, topic in enumerate(topics, 1)}
             result = self.client.complete_structured(
                 messages=[
                     {"role": "system", "content": prompt},
                     {
                         "role": "user",
                         "content": json.dumps(
-                            {"topics": [_topic_payload(session, x) for x in topics]},
+                            {
+                                "topics": [
+                                    _topic_payload(session, topic, topic_ref=topic_ref)
+                                    for topic_ref, topic in zip(topic_refs, topics, strict=True)
+                                ]
+                            },
                             ensure_ascii=False,
                         ),
                     },
                 ],
-                output_model=TrackBuildOutput,
+                output_model=CompactTrackBuildOutput,
                 model=self.config.stage4.model,
                 max_tokens=self.config.stage4.generation_max_output_tokens,
                 enable_thinking=False,
+            )
+            result.output = _expand_topic_refs(
+                session,
+                result.output,
+                topic_refs,
+                {topic.id: topic for topic in topics},
             )
             adjustments = _normalize_build_output(session, result.output, topics)
             if adjustments:
@@ -242,7 +259,10 @@ class TrackService:
             supporting_event_ids = sorted(
                 _event_ids_for_topic_ids(session, member_topic_ids), key=str
             )
-            canonical_key = f"track_{fingerprint(proposed.name.casefold(), proposed.definition.casefold())[:20]}"
+            identity_fp = fingerprint(
+                proposed.name.casefold(), proposed.definition.casefold()
+            )
+            canonical_key = f"track_{identity_fp[:20]}"
             track = session.scalar(
                 select(CandidateTrack).where(
                     CandidateTrack.research_plan_id == run.research_plan_id,
@@ -322,7 +342,7 @@ class TrackService:
             select(CandidateTrack)
             .where(
                 CandidateTrack.research_plan_id == plan_id,
-                CandidateTrack.status == "candidate",
+                CandidateTrack.status.in_(["candidate", "watchlist"]),
             )
             .order_by(CandidateTrack.name)
         )
@@ -479,7 +499,8 @@ def track_status(session: Session, plan_id: uuid.UUID) -> TrackStatus:
     track_count = int(
         session.scalar(
             select(func.count(CandidateTrack.id)).where(
-                CandidateTrack.research_plan_id == plan_id, CandidateTrack.status == "candidate"
+                CandidateTrack.research_plan_id == plan_id,
+                CandidateTrack.status.in_(["candidate", "watchlist"]),
             )
         )
         or 0
@@ -488,7 +509,10 @@ def track_status(session: Session, plan_id: uuid.UUID) -> TrackStatus:
         session.scalar(
             select(func.count(func.distinct(CandidateTrackTopic.topic_id)))
             .join(CandidateTrack, CandidateTrack.id == CandidateTrackTopic.candidate_track_id)
-            .where(CandidateTrack.research_plan_id == plan_id, CandidateTrack.status == "candidate")
+            .where(
+                CandidateTrack.research_plan_id == plan_id,
+                CandidateTrack.status.in_(["candidate", "watchlist"]),
+            )
         )
         or 0
     )
@@ -498,6 +522,7 @@ def track_status(session: Session, plan_id: uuid.UUID) -> TrackStatus:
             .join(CandidateTrack, CandidateTrack.id == CandidateTrackAnalysis.candidate_track_id)
             .where(
                 CandidateTrack.research_plan_id == plan_id,
+                CandidateTrack.status.in_(["candidate", "watchlist"]),
                 CandidateTrackAnalysis.status == TaskStatus.COMPLETED,
             )
         )
@@ -512,35 +537,71 @@ def track_status(session: Session, plan_id: uuid.UUID) -> TrackStatus:
     )
 
 
-def _topic_payload(session: Session, topic: Topic) -> dict[str, Any]:
+def _topic_payload(
+    session: Session, topic: Topic, *, topic_ref: str | None = None
+) -> dict[str, Any]:
     events = list(
         session.scalars(
             select(Event)
             .join(TopicEvent, TopicEvent.event_id == Event.id)
             .where(TopicEvent.topic_id == topic.id)
             .order_by(Event.signal_date.desc().nulls_last())
-            .limit(2)
+            .limit(1)
         )
     )
-    return {
-        "topic_id": str(topic.id),
+    payload = {
         "label": topic.label,
-        "definition": topic.definition,
-        "summary": topic.summary,
-        "keywords": topic.keywords,
-        "industries": topic.industries,
+        "definition": _compact_text(topic.definition, 260),
         "event_count": topic.event_count,
         "representative_events": [
             {
                 "event_id": str(x.id),
                 "event_type": x.event_type,
-                "title": x.title,
-                "summary": x.summary,
-                "chain_roles": x.chain_roles,
+                "title": _compact_text(x.title, 180),
             }
             for x in events
         ],
     }
+    payload["topic_ref" if topic_ref else "topic_id"] = topic_ref or str(topic.id)
+    return payload
+
+
+def _expand_topic_refs(
+    session: Session,
+    output: CompactTrackBuildOutput,
+    topic_refs: dict[str, uuid.UUID],
+    topics: dict[uuid.UUID, Topic],
+) -> TrackBuildOutput:
+    """Translate compact model-facing references back to persistent Topic IDs."""
+    tracks = []
+    for track in output.tracks:
+        topic_ids = list(
+            dict.fromkeys(topic_refs[ref] for ref in track.refs if ref in topic_refs)
+        )
+        if not topic_ids:
+            continue
+        event_count = len(_event_ids_for_topic_ids(session, topic_ids))
+        if len(topic_ids) == 1:
+            definition = topics[topic_ids[0]].definition
+        else:
+            definition = (
+                f"围绕{track.name}开展相关产品、技术或服务研发、生产与交付的企业集合。"
+            )
+        tracks.append(
+            {
+                "name": track.name,
+                "definition": definition,
+                "topic_ids": topic_ids,
+                "status": "candidate" if event_count >= 2 else "watchlist",
+                "confidence": 0.75 if event_count >= 2 else 0.55,
+            }
+        )
+    return TrackBuildOutput.model_validate({"tracks": tracks})
+
+
+def _compact_text(value: str, limit: int) -> str:
+    normalized = " ".join(value.split())
+    return normalized if len(normalized) <= limit else normalized[: limit - 1].rstrip() + "…"
 
 
 def _analysis_input(
@@ -553,21 +614,23 @@ def _analysis_input(
             .where(CandidateTrackTopic.candidate_track_id == track.id)
         )
     )
-    topic_ids = [topic.id for _, topic in rows]
-    available_event_ids = _event_ids_for_topic_ids(session, topic_ids)
     declared_event_ids = {uuid.UUID(x) for x in track.supporting_event_ids}
-    event_ids = declared_event_ids & available_event_ids
     events = (
         list(
             session.scalars(
                 select(Event)
-                .where(Event.id.in_(event_ids))
+                .where(Event.id.in_(declared_event_ids))
                 .order_by(Event.signal_date.desc().nulls_last(), Event.id)
             )
         )
-        if event_ids
+        if declared_event_ids
         else []
     )
+    # supporting_event_ids is the evidence snapshot saved when this Track was
+    # built. Topic memberships are mutable across later Topic rebuilds, so they
+    # must not be used to decide whether the Track's original evidence remains
+    # available for analysis.
+    event_ids = {event.id for event in events}
     evidence = (
         list(session.scalars(select(EventEvidence).where(EventEvidence.event_id.in_(event_ids))))
         if event_ids
