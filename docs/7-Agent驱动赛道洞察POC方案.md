@@ -505,17 +505,12 @@ Track Agent 围绕共同企业原型归并 Topic。主要判断标准是：
   "candidate_track_id": "ctrk_industrial_vision_solutions",
   "name": "工业视觉质检设备与解决方案",
   "definition": "从事工业视觉质量检测设备、软件和整体解决方案研发、生产与交付的企业集合",
-  "enterprise_archetype": "工业视觉检测设备制造商、质检软件企业和整体解决方案服务商",
   "core_topic_ids": ["topic_industrial_vision_inspection"],
   "supporting_topic_ids": ["topic_manufacturing_quality_digitalization"],
   "adjacent_topic_ids": ["topic_industrial_camera"],
-  "included_activities": ["视觉检测设备研发制造", "缺陷识别软件研发", "质检系统集成"],
-  "excluded_activities": ["仅使用视觉质检的制造企业", "通用安防摄像头制造"],
-  "chain_roles": ["设备供应商", "软件供应商", "解决方案服务商"],
-  "observable_company_features": ["产品包含工业视觉检测设备或软件", "具有制造业质检项目案例"],
-  "possible_it_needs": ["AI训练与推理算力", "研发工作站", "边缘计算", "项目数据存储"],
   "event_group_ids": ["ieg_01JXYZ"],
   "regions": ["北京市"],
+  "confidence": 0.82,
   "status": "candidate"
 }
 ```
@@ -526,6 +521,16 @@ Track Agent 围绕共同企业原型归并 Topic。主要判断标准是：
 {
   "analysis_id": "analysis_ctrk_industrial_vision_solutions_v1",
   "candidate_track_id": "ctrk_industrial_vision_solutions",
+  "enterprise_archetype": "工业视觉检测设备制造商、质检软件企业和整体解决方案服务商",
+  "core_products_services": ["工业视觉检测设备", "缺陷识别软件", "质检系统集成服务"],
+  "core_company_types": ["工业视觉设备制造商", "质检软件及解决方案企业"],
+  "supporting_company_types": ["光学组件和视觉算法供应商"],
+  "shared_demand_drivers": ["制造企业自动化质量检测需求"],
+  "included_activities": ["视觉检测设备研发制造", "缺陷识别软件研发", "质检系统集成"],
+  "excluded_activities": ["仅使用视觉质检的制造企业", "通用安防摄像头制造"],
+  "chain_roles": ["设备供应商", "软件供应商", "解决方案服务商"],
+  "observable_company_features": ["产品包含工业视觉检测设备或软件", "具有制造业质检项目案例"],
+  "possible_it_needs": ["AI训练与推理算力", "研发工作站", "边缘计算", "项目数据存储"],
   "summary": "该候选赛道围绕工业生产中的视觉质量检测设备、软件和项目交付形成。",
   "why_now": "近期同时出现技术改造政策、质检项目落地和相关企业业务扩展信号。",
   "signal_statistics": {

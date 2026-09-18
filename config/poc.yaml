@@ -7,10 +7,11 @@ scope:
 bailian:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
   model: qwen3.7-flash
+  search_max_output_tokens: 8192
   review_batch_size: 10
   timeout_seconds: 120
   max_retries: 2
-  max_concurrency: 1
+  max_concurrency: 4
 budgets:
   max_work_packages: 8
   max_searches_per_work_package: 8
@@ -27,3 +28,39 @@ coverage:
 prompts:
   planning: config/prompts/planning_v1.md
   search_review: config/prompts/search_review_v1.md
+stage2:
+  http_timeout_seconds: 30
+  http_max_retries: 2
+  http_min_interval_per_host_seconds: 1.0
+  max_response_bytes: 15728640
+  min_usable_text_chars: 500
+  max_model_input_chars: 80000
+  analysis_model: qwen3.7-flash
+  web_extractor_model: qwen3.7-flash
+  web_extractor_reasoning_effort: low
+  ocr_model: qwen3.5-ocr
+  analysis_max_output_tokens: 16384
+  web_extractor_max_output_tokens: 8192
+  prompts:
+    event_extraction: config/prompts/event_extraction_v2.md
+stage3:
+  model: qwen3.7-flash
+  event_batch_size: 10
+  max_events_per_run: 200
+  max_topics_per_event: 3
+  minimum_event_confidence: 0.70
+  generation_max_output_tokens: 8192
+  reconciliation_batch_size: 12
+  reconciliation_max_output_tokens: 16384
+  prompts:
+    topic_generation: config/prompts/topic_generation_v1.md
+    topic_reconciliation: config/prompts/topic_reconciliation_v1.md
+stage4:
+  model: qwen3.7-flash
+  minimum_supporting_events: 1
+  forbid_region_in_identity: true
+  generation_max_output_tokens: 16384
+  analysis_max_output_tokens: 8192
+  prompts:
+    track_generation: config/prompts/track_generation_v1.md
+    track_analysis: config/prompts/track_analysis_v1.md

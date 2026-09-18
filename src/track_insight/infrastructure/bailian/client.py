@@ -8,7 +8,11 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from track_insight.core.errors import ModelCallError
-from track_insight.infrastructure.bailian.contracts import ModelRunResult, WebSearchSource
+from track_insight.infrastructure.bailian.contracts import (
+    ModelRunResult,
+    RemotePageResult,
+    WebSearchSource,
+)
 
 OutputT = TypeVar("OutputT", bound=BaseModel)
 logger = logging.getLogger(__name__)
@@ -31,6 +35,9 @@ class BailianClient:
             timeout=timeout_seconds,
             transport=transport,
         )
+
+    def close(self) -> None:
+        self.compatible_client.close()
 
     def complete_structured(
         self,
@@ -100,6 +107,7 @@ class BailianClient:
         output_model: type[OutputT],
         model: str,
         review_batch_size: int,
+        search_max_output_tokens: int,
         on_sources_discovered: Callable[[list[WebSearchSource]], None] | None = None,
     ) -> ModelRunResult[OutputT]:
         task_content = _last_user_content(messages)
@@ -107,14 +115,19 @@ class BailianClient:
         search_payload = {
             "model": model,
             "instructions": (
-                "必须使用联网搜索完成查询。优先寻找原始政策、机构、园区、企业和权威产业"
-                "来源；回答中简要概括搜索结果，勿编造网址。"
+                "必须先调用 web_search 工具完成查询，禁止不调用工具而直接回答。"
+                "优先寻找原始政策、机构、园区、企业和权威产业来源；勿编造网址。"
             ),
-            "input": query,
+            "input": f"请使用联网搜索工具检索：{query}",
             "tools": [{"type": "web_search"}],
-            "tool_choice": "required",
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [{"type": "web_search"}],
+            },
             "enable_thinking": False,
-            "max_output_tokens": 1200,
+            "reasoning": {"effort": "none"},
+            "max_output_tokens": search_max_output_tokens,
             "store": False,
         }
         search_response = self._post_compatible(
@@ -123,12 +136,53 @@ class BailianClient:
             operation="responses_web_search",
         )
         sources = _parse_search_sources(search_response)
+        retry_response: dict[str, Any] | None = None
         if not sources:
-            raise ModelCallError(
-                "Bailian response contains no search sources with URLs",
-                code="missing_search_sources",
-                diagnostics={"initial_response": search_response},
+            retry_payload = {
+                **search_payload,
+                "instructions": (
+                    "这是强制联网检索任务。第一步必须调用 web_search；只有工具完成后才能"
+                    "生成简短回答。禁止仅凭模型知识回答。"
+                ),
+                "input": f"强制联网搜索并返回来源：{query}",
+            }
+            retry_response = self._post_compatible(
+                "responses",
+                retry_payload,
+                operation="responses_web_search_retry",
             )
+            sources = _parse_search_sources(retry_response)
+        if not sources:
+            responses = [search_response, retry_response]
+            incomplete = next(
+                (
+                    response
+                    for response in responses
+                    if response is not None and response.get("status") == "incomplete"
+                ),
+                None,
+            )
+            if incomplete is not None:
+                reason = (incomplete.get("incomplete_details") or {}).get("reason")
+                raise ModelCallError(
+                    f"Bailian Responses call incomplete: {reason or 'unknown reason'}",
+                    code="incomplete_response",
+                    retryable=True,
+                    diagnostics={
+                        "initial_response": search_response,
+                        "retry_response": retry_response,
+                    },
+                )
+            raise ModelCallError(
+                "Bailian completed without calling web_search or returning source URLs",
+                code="search_tool_not_called",
+                retryable=True,
+                diagnostics={
+                    "initial_response": search_response,
+                    "retry_response": retry_response,
+                },
+            )
+        effective_search_response = retry_response or search_response
         if on_sources_discovered is not None:
             on_sources_discovered(sources)
         batches = [
@@ -138,7 +192,9 @@ class BailianClient:
         judgments: list[dict[str, Any]] = []
         review_responses: list[dict[str, Any]] = []
         usage: dict[str, Any] = dict(search_response.get("usage") or {})
-        call_count = 1
+        if retry_response is not None:
+            usage = _merge_usage(usage, retry_response.get("usage") or {})
+        call_count = 1 + int(retry_response is not None)
         recovery_used = False
         last_request_id: str | None = None
         for batch_index, batch in enumerate(batches, start=1):
@@ -154,7 +210,7 @@ class BailianClient:
             review_messages = _review_messages(
                 messages=messages,
                 task_content=task_content,
-                search_response=search_response,
+                search_response=effective_search_response,
                 sources=batch,
                 batch_index=batch_index,
                 batch_count=len(batches),
@@ -169,6 +225,8 @@ class BailianClient:
                 _validate_reference_coverage(review.output, batch)
             except ModelCallError as error:
                 error.diagnostics.setdefault("search_response", search_response)
+                if retry_response is not None:
+                    error.diagnostics.setdefault("search_retry_response", retry_response)
                 error.diagnostics.setdefault("review_batch_index", batch_index)
                 error.diagnostics.setdefault("review_batch_count", len(batches))
                 raise
@@ -198,12 +256,138 @@ class BailianClient:
             usage=usage,
             raw_response={
                 "search_response": search_response,
+                "search_retry_response": retry_response,
                 "review_responses": review_responses,
             },
             output=output,
             web_search=sources,
             call_count=call_count,
             recovery_used=recovery_used,
+        )
+
+    def extract_web_page(
+        self,
+        *,
+        url: str,
+        goal: str,
+        model: str,
+        max_output_tokens: int,
+        reasoning_effort: str = "low",
+    ) -> RemotePageResult:
+        response = self._post_compatible(
+            "responses",
+            {
+                "model": model,
+                "instructions": (
+                    "访问用户指定的单一URL并提取该页面的实际正文。不要使用其他网页补充信息，"
+                    "不要根据模型知识补写；尽可能保留页面原文事实、日期、主体和表格信息。"
+                ),
+                "input": f"指定页面：{url}\n提取目标：{goal}",
+                "tools": [{"type": "web_search"}, {"type": "web_extractor"}],
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "mode": "required",
+                    "tools": [{"type": "web_extractor"}],
+                },
+                "reasoning": {"effort": reasoning_effort},
+                "max_output_tokens": max_output_tokens,
+                "store": False,
+            },
+            operation="responses_web_extractor",
+        )
+        if response.get("status") == "incomplete":
+            reason = (response.get("incomplete_details") or {}).get("reason") or "unknown"
+            raise ModelCallError(
+                f"Bailian web extraction incomplete: {reason}",
+                code="incomplete_response",
+                retryable=True,
+                diagnostics={"response": response},
+            )
+        calls = [
+            item
+            for item in response.get("output", [])
+            if isinstance(item, dict) and item.get("type") == "web_extractor_call"
+        ]
+        completed = [item for item in calls if item.get("status") == "completed"]
+        if not completed:
+            raise ModelCallError(
+                "Bailian did not complete a web_extractor call",
+                code="web_extractor_not_called",
+                retryable=True,
+                diagnostics={"response": response},
+            )
+        text_parts = [str(item.get("output", "")).strip() for item in completed]
+        extracted_text = "\n\n".join(part for part in text_parts if part)
+        if not extracted_text:
+            raise ModelCallError(
+                "Bailian web_extractor returned empty content",
+                code="empty_remote_content",
+                retryable=True,
+                diagnostics={"response": response},
+            )
+        return RemotePageResult(
+            request_id=response.get("id"),
+            model=str(response.get("model") or model),
+            usage=response.get("usage") or {},
+            raw_response=response,
+            extracted_text=extracted_text,
+        )
+
+    def extract_pdf_ocr(
+        self,
+        *,
+        url: str,
+        model: str,
+        max_output_tokens: int,
+    ) -> RemotePageResult:
+        response = self._post_compatible(
+            "responses",
+            {
+                "model": model,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_file", "file_url": url},
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "提取PDF页面中的可见文字，按阅读顺序保留标题、段落和表格；"
+                                    "不要总结或补写。"
+                                ),
+                            },
+                        ],
+                    }
+                ],
+                "ocr_options": {"task": "document_parsing"},
+                "reasoning": {"effort": "none"},
+                "max_output_tokens": max_output_tokens,
+                "store": False,
+            },
+            operation="responses_pdf_ocr",
+        )
+        if response.get("status") == "incomplete":
+            reason = (response.get("incomplete_details") or {}).get("reason") or "unknown"
+            raise ModelCallError(
+                f"Bailian PDF OCR incomplete: {reason}",
+                code="incomplete_response",
+                retryable=True,
+                diagnostics={"response": response},
+            )
+        extracted_text = _response_output_text(response) or _response_ocr_text(response)
+        if not extracted_text:
+            raise ModelCallError(
+                "Bailian OCR returned no text",
+                code="empty_ocr_content",
+                retryable=True,
+                diagnostics={"response": response},
+            )
+        return RemotePageResult(
+            request_id=response.get("id"),
+            model=str(response.get("model") or model),
+            usage=response.get("usage") or {},
+            raw_response=response,
+            extracted_text=extracted_text,
         )
 
     def _post_compatible(
@@ -371,8 +555,7 @@ def _review_messages(
         {
             "role": "system",
             "content": (
-                _system_content(messages)
-                + "\n\n你只审阅当前批次给定的结果，不再联网搜索。"
+                _system_content(messages) + "\n\n你只审阅当前批次给定的结果，不再联网搜索。"
                 "每条输入恰好输出一条判断，并逐字复制 refer；"
                 "不得遗漏、合并、增加或改写 refer。"
             ),
@@ -466,6 +649,20 @@ def _response_output_text(payload: dict[str, Any]) -> str | None:
                 if isinstance(text, str):
                     texts.append(text)
     return "\n".join(texts) or None
+
+
+def _response_ocr_text(payload: dict[str, Any]) -> str | None:
+    parts: list[str] = []
+    for item in payload.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content") or []:
+            if not isinstance(content, dict):
+                continue
+            value = content.get("ocr_result") or content.get("text")
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+    return "\n".join(parts) or None
 
 
 def _system_content(messages: list[dict[str, Any]]) -> str:

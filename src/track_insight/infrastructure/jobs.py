@@ -1,6 +1,8 @@
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import or_, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from track_insight.core.enums import TaskStatus
@@ -31,31 +33,50 @@ def enqueue_job(
     existing = session.scalar(select(Job).where(Job.idempotency_key == key))
     if existing is not None:
         return existing
-    job = Job(
-        job_type=job_type,
-        object_type=object_type,
-        object_id=object_id,
-        idempotency_key=key,
-        input_fingerprint=input_fingerprint,
-        processor_version=processor_version,
-        priority=priority,
-        max_attempts=max_attempts,
+    job_id = uuid.uuid4()
+    inserted_id = session.scalar(
+        insert(Job)
+        .values(
+            id=job_id,
+            job_type=job_type,
+            object_type=object_type,
+            object_id=object_id,
+            idempotency_key=key,
+            input_fingerprint=input_fingerprint,
+            processor_version=processor_version,
+            status=TaskStatus.PENDING,
+            priority=priority,
+            attempts=0,
+            max_attempts=max_attempts,
+        )
+        .on_conflict_do_nothing(index_elements=[Job.idempotency_key])
+        .returning(Job.id)
     )
-    session.add(job)
-    session.flush()
-    return job
+    if inserted_id is not None:
+        return session.get(Job, inserted_id)
+    return session.scalar(select(Job).where(Job.idempotency_key == key))
 
 
-def claim_job(session: Session, *, worker_id: str, lease_seconds: int, job_type: str) -> Job | None:
+def claim_job(
+    session: Session,
+    *,
+    worker_id: str,
+    lease_seconds: int,
+    job_type: str,
+    processor_version: str | None = None,
+) -> Job | None:
     now = datetime.now(UTC)
+    conditions = [
+        Job.job_type == job_type,
+        Job.status.in_((TaskStatus.PENDING, TaskStatus.FAILED_RETRYABLE)),
+        Job.scheduled_at <= now,
+        Job.attempts < Job.max_attempts,
+    ]
+    if processor_version is not None:
+        conditions.append(Job.processor_version == processor_version)
     job = session.scalar(
         select(Job)
-        .where(
-            Job.job_type == job_type,
-            Job.status.in_((TaskStatus.PENDING, TaskStatus.FAILED_RETRYABLE)),
-            Job.scheduled_at <= now,
-            Job.attempts < Job.max_attempts,
-        )
+        .where(*conditions)
         .order_by(Job.priority, Job.scheduled_at)
         .limit(1)
         .with_for_update(skip_locked=True)

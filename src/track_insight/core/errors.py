@@ -40,3 +40,10 @@ class ModelCallError(TrackInsightError):
 
 class ContractError(TrackInsightError):
     pass
+
+
+class PageFetchError(TrackInsightError):
+    def __init__(self, message: str, *, code: str, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable

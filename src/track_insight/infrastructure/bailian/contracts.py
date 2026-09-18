@@ -21,3 +21,11 @@ class ModelRunResult[OutputT: BaseModel](BaseModel):
     web_search: list[WebSearchSource] = Field(default_factory=list)
     call_count: int = 1
     recovery_used: bool = False
+
+
+class RemotePageResult(BaseModel):
+    request_id: str | None = None
+    model: str
+    usage: dict[str, Any] = Field(default_factory=dict)
+    raw_response: dict[str, Any]
+    extracted_text: str

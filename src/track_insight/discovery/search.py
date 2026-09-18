@@ -248,6 +248,7 @@ class SearchService:
             tool_config={
                 "type": "web_search",
                 "review_batch_size": self.config.bailian.review_batch_size,
+                "search_max_output_tokens": self.config.bailian.search_max_output_tokens,
                 "api": "responses",
             },
             started_at=datetime.now(UTC),
@@ -341,6 +342,7 @@ class SearchService:
                 output_model=SearchReviewOutput,
                 model=self.config.bailian.model,
                 review_batch_size=self.config.bailian.review_batch_size,
+                search_max_output_tokens=self.config.bailian.search_max_output_tokens,
                 on_sources_discovered=persist_discovered_sources,
             )
             judgments = {item.refer: item for item in result.output.judgments}
