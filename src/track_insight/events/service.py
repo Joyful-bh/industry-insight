@@ -16,8 +16,8 @@ from track_insight.core.errors import ContractError, ModelCallError
 from track_insight.core.fingerprints import fingerprint
 from track_insight.events.contracts import (
     DirectEventOutput,
-    ExtractedEvent,
     EventEvidenceCoverage,
+    ExtractedEvent,
     PageEventOutput,
     Stage2Status,
 )
@@ -29,6 +29,7 @@ from track_insight.infrastructure.jobs import (
     complete_job,
     enqueue_job,
     fail_job,
+    reconcile_stale_pipeline_runs,
     requeue_expired_jobs,
 )
 from track_insight.infrastructure.models import (
@@ -82,6 +83,7 @@ class EventService:
         pipeline_run_id = uuid.uuid4()
         counts = {"completed": 0, "failed": 0, "skipped": 0, "event_count": 0}
         with session_scope() as session:
+            reconcile_stale_pipeline_runs(session)
             _enqueue_current_analysis_jobs(session, self.config)
             run = PipelineRun(
                 id=pipeline_run_id,
@@ -304,18 +306,22 @@ class EventService:
             run = session.get(PipelineRun, pipeline_run_id)
             if run:
                 run.counters = counts.copy()
+                partial_success = counts["completed"] > 0 and counts["failed"] > 0
                 run.status = (
-                    TaskStatus.COMPLETED if counts["failed"] == 0 else TaskStatus.FAILED_RETRYABLE
+                    TaskStatus.COMPLETED
+                    if counts["completed"] > 0 or counts["failed"] == 0
+                    else TaskStatus.FAILED_RETRYABLE
                 )
                 run.finished_at = datetime.now(UTC)
                 record_event(
                     session,
                     event_type=(
                         "event_extract.run.completed"
-                        if counts["failed"] == 0
+                        if run.status == TaskStatus.COMPLETED
                         else "event_extract.run.failed"
                     ),
                     message="Page review and event extraction run finished",
+                    level="WARNING" if partial_success else "INFO",
                     pipeline_run_id=run.id,
                     details=counts.copy(),
                 )

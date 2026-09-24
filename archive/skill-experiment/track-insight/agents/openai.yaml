@@ -1,0 +1,4 @@
+interface:
+  display_name: "赛道洞察"
+  short_description: "调研产业信号并形成可追溯的联想 SMB 重点赛道洞察"
+  default_prompt: "使用 $track-insight 调研指定主题、区域和时间范围内适合联想 SMB 业务的重点赛道。"

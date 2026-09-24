@@ -19,7 +19,13 @@ from track_insight.events.service import enqueue_page_analysis
 from track_insight.infrastructure.bailian.client import BailianClient
 from track_insight.infrastructure.database import session_scope
 from track_insight.infrastructure.events import record_event
-from track_insight.infrastructure.jobs import claim_job, complete_job, enqueue_job, fail_job
+from track_insight.infrastructure.jobs import (
+    claim_job,
+    complete_job,
+    enqueue_job,
+    fail_job,
+    reconcile_stale_pipeline_runs,
+)
 from track_insight.infrastructure.models import (
     Job,
     ModelRun,
@@ -128,6 +134,7 @@ class PageService:
         pipeline_run_id = uuid.uuid4()
         counts = {"completed": 0, "failed": 0, "skipped": 0}
         with session_scope() as session:
+            reconcile_stale_pipeline_runs(session)
             run = PipelineRun(
                 id=pipeline_run_id,
                 run_type="page_fetch",
@@ -276,18 +283,22 @@ class PageService:
             run = session.get(PipelineRun, pipeline_run_id)
             if run:
                 run.counters = counts.copy()
+                partial_success = counts["completed"] > 0 and counts["failed"] > 0
                 run.status = (
-                    TaskStatus.COMPLETED if counts["failed"] == 0 else TaskStatus.FAILED_RETRYABLE
+                    TaskStatus.COMPLETED
+                    if counts["completed"] > 0 or counts["failed"] == 0
+                    else TaskStatus.FAILED_RETRYABLE
                 )
                 run.finished_at = datetime.now(UTC)
                 record_event(
                     session,
                     event_type=(
                         "page_fetch.run.completed"
-                        if counts["failed"] == 0
+                        if run.status == TaskStatus.COMPLETED
                         else "page_fetch.run.failed"
                     ),
                     message="Page acquisition run finished",
+                    level="WARNING" if partial_success else "INFO",
                     pipeline_run_id=run.id,
                     details=counts.copy(),
                 )

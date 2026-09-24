@@ -15,7 +15,13 @@ from track_insight.discovery.url_registry import register_candidate
 from track_insight.infrastructure.bailian.client import BailianClient
 from track_insight.infrastructure.bailian.contracts import WebSearchSource
 from track_insight.infrastructure.events import record_event
-from track_insight.infrastructure.jobs import claim_job_for_object, complete_job, fail_job
+from track_insight.infrastructure.jobs import (
+    claim_job_for_object,
+    complete_job,
+    fail_job,
+    reconcile_stale_pipeline_runs,
+    requeue_expired_jobs,
+)
 from track_insight.infrastructure.models import (
     Job,
     ModelRun,
@@ -53,6 +59,8 @@ class SearchService:
         plan = session.get(ResearchPlan, plan_id)
         if plan is None:
             raise ContractError("research plan does not exist")
+        requeue_expired_jobs(session)
+        reconcile_stale_pipeline_runs(session)
         pipeline_run = PipelineRun(
             run_type="search_discovery",
             status=TaskStatus.RUNNING,
@@ -133,7 +141,19 @@ class SearchService:
                     object_id=str(task.id),
                 )
                 if job is None:
-                    raise ContractError(f"search job is not claimable: {task.id}")
+                    skipped += 1
+                    record_event(
+                        session,
+                        event_type="search.task.skipped",
+                        message="Search task skipped because its job is currently not claimable",
+                        level="WARNING",
+                        pipeline_run_id=pipeline_run.id,
+                        entity_type="search_task",
+                        entity_id=task.id,
+                        details={"status": str(task.status), "query": task.query},
+                    )
+                    session.commit()
+                    continue
                 remaining_candidates = package.max_candidates - self._candidate_count(
                     session, package.id
                 )
@@ -156,38 +176,20 @@ class SearchService:
                         remaining_candidates=remaining_candidates,
                     )
                     processed += 1
-                except ModelCallError as error:
+                except ModelCallError:
                     failed += 1
                     session.commit()
-                    if not error.retryable:
-                        pipeline_run.status = TaskStatus.FAILED_TERMINAL
-                        pipeline_run.finished_at = datetime.now(UTC)
-                        pipeline_run.counters = {
-                            "processed_searches": processed,
-                            "skipped_searches": skipped,
-                            "failed_searches": failed,
-                        }
-                        record_event(
-                            session,
-                            event_type="search.run.failed",
-                            message="Search discovery run stopped after terminal task failure",
-                            level="ERROR",
-                            pipeline_run_id=pipeline_run.id,
-                            entity_type="research_plan",
-                            entity_id=plan.id,
-                            details={
-                                **pipeline_run.counters,
-                                "error_code": error.code,
-                                "error_message": str(error),
-                            },
-                        )
-                        session.commit()
-                        raise
+                    continue
                 session.commit()
             self._update_package_status(session, package)
             session.commit()
         audit = build_coverage_audit(session, plan.id, self.config)
-        pipeline_run.status = TaskStatus.FAILED_RETRYABLE if failed else TaskStatus.COMPLETED
+        partial_success = processed > 0 and failed > 0
+        pipeline_run.status = (
+            TaskStatus.COMPLETED
+            if processed > 0 or failed == 0
+            else TaskStatus.FAILED_RETRYABLE
+        )
         pipeline_run.finished_at = datetime.now(UTC)
         pipeline_run.counters = {
             "processed_searches": processed,
@@ -197,8 +199,13 @@ class SearchService:
         }
         record_event(
             session,
-            event_type="search.run.completed",
+            event_type=(
+                "search.run.completed"
+                if pipeline_run.status == TaskStatus.COMPLETED
+                else "search.run.failed"
+            ),
             message="Search discovery run completed",
+            level="WARNING" if partial_success else "INFO",
             pipeline_run_id=pipeline_run.id,
             entity_type="research_plan",
             entity_id=plan.id,

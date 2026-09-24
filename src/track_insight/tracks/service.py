@@ -1,6 +1,7 @@
 import json
 import re
 import uuid
+from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from track_insight.core.errors import ContractError, ModelCallError
 from track_insight.core.fingerprints import fingerprint
 from track_insight.infrastructure.bailian.client import BailianClient
 from track_insight.infrastructure.events import record_event
+from track_insight.infrastructure.jobs import reconcile_stale_pipeline_runs
 from track_insight.infrastructure.models import (
     CandidateTrack,
     CandidateTrackAnalysis,
@@ -23,20 +25,23 @@ from track_insight.infrastructure.models import (
     PageAnalysis,
     PageCapture,
     PipelineRun,
+    ResearchWorkPackage,
     Topic,
     TopicEvent,
     TrackBuildRun,
     UrlCandidate,
+    UrlDiscovery,
 )
 from track_insight.settings import PocConfig
 from track_insight.tracks.contracts import (
+    CompactCandidateTrackOutput,
     CompactTrackBuildOutput,
     TrackAnalysisOutput,
     TrackBuildOutput,
     TrackStatus,
 )
 
-TRACK_PROCESSOR_VERSION = "topic-track-v7-short-refs"
+TRACK_PROCESSOR_VERSION = "topic-track-v8-global-fallback"
 ANALYSIS_PROCESSOR_VERSION = "track-analysis-v4-snapshotted-events"
 
 NON_TRACK_IDENTITY_TERMS = (
@@ -75,6 +80,7 @@ class TrackService:
     def build(
         self, session: Session, *, plan_id: uuid.UUID, max_topics: int | None = None
     ) -> dict[str, Any]:
+        reconcile_stale_pipeline_runs(session)
         total_topic_count = int(
             session.scalar(
                 select(func.count(Topic.id)).where(
@@ -95,9 +101,14 @@ class TrackService:
             raise ContractError("no candidate Topics found for the research plan")
         prompt = self.config.stage4.prompts.track_generation.read_text(encoding="utf-8")
         prompt_version = _prompt_version(self.config.stage4.prompts.track_generation, prompt)
+        merge_prompt = self.config.stage4.prompts.track_merge.read_text(encoding="utf-8")
+        merge_prompt_version = _prompt_version(
+            self.config.stage4.prompts.track_merge, merge_prompt
+        )
+        build_prompt_version = f"{prompt_version}|{merge_prompt_version}"
         input_fp = fingerprint(
             [(str(x.id), x.topic_fingerprint) for x in topics],
-            prompt_version,
+            build_prompt_version,
             self.config.stage4.model,
             self.config.stage4.minimum_supporting_events,
         )
@@ -124,7 +135,7 @@ class TrackService:
             status=TaskStatus.RUNNING,
             input_fingerprint=input_fp,
             processor_version=TRACK_PROCESSOR_VERSION,
-            prompt_version=prompt_version,
+            prompt_version=build_prompt_version,
             model=self.config.stage4.model,
             topic_ids=[str(x.id) for x in topics],
             topic_count=len(topics),
@@ -154,34 +165,55 @@ class TrackService:
         session.commit()
         try:
             topic_refs = {f"T{index}": topic.id for index, topic in enumerate(topics, 1)}
-            result = self.client.complete_structured(
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {
-                                "topics": [
-                                    _topic_payload(session, topic, topic_ref=topic_ref)
-                                    for topic_ref, topic in zip(topic_refs, topics, strict=True)
-                                ]
-                            },
-                            ensure_ascii=False,
-                        ),
+            try:
+                result = self._call_track_model(
+                    session=session,
+                    prompt=prompt,
+                    topics=topics,
+                    topic_refs=topic_refs,
+                )
+                _complete_model_run(model_run, result)
+                output = _expand_topic_refs(
+                    session,
+                    result.output,
+                    topic_refs,
+                    {topic.id: topic for topic in topics},
+                )
+                build_mode = "global"
+                fallback_stats = None
+            except (ModelCallError, ContractError) as global_error:
+                _fail_model_run_only(model_run, global_error)
+                record_event(
+                    session,
+                    event_type="track.fallback.started",
+                    message="Global Track generation failed; fallback started",
+                    level="WARNING",
+                    pipeline_run_id=pipeline.id,
+                    model_run_id=model_run.id,
+                    entity_type="track_build_run",
+                    entity_id=run.id,
+                    details={
+                        "error_code": getattr(global_error, "code", "track_contract_error"),
+                        "error_message": str(global_error),
                     },
-                ],
-                output_model=CompactTrackBuildOutput,
-                model=self.config.stage4.model,
-                max_tokens=self.config.stage4.generation_max_output_tokens,
-                enable_thinking=False,
-            )
-            result.output = _expand_topic_refs(
-                session,
-                result.output,
-                topic_refs,
-                {topic.id: topic for topic in topics},
-            )
-            adjustments = _normalize_build_output(session, result.output, topics)
+                )
+                session.commit()
+                output, fallback_model_run_id, fallback_stats = self._build_with_fallback(
+                    session=session,
+                    pipeline=pipeline,
+                    run=run,
+                    topics=topics,
+                    topic_refs=topic_refs,
+                    generation_prompt=prompt,
+                    generation_prompt_version=prompt_version,
+                    merge_prompt=merge_prompt,
+                    merge_prompt_version=merge_prompt_version,
+                )
+                if fallback_model_run_id is not None:
+                    run.model_run_id = fallback_model_run_id
+                build_mode = "fallback"
+
+            adjustments = _normalize_build_output(session, output, topics)
             if adjustments:
                 record_event(
                     session,
@@ -194,13 +226,12 @@ class TrackService:
                     entity_id=run.id,
                     details={"adjustments": adjustments},
                 )
-            _validate_build(session, result.output, topics, self.config)
-            _complete_model_run(model_run, result)
+            _validate_build(session, output, topics, self.config)
             self._persist_tracks(
                 session,
                 run,
                 topics,
-                result.output,
+                output,
                 archive_stale=len(topics) == total_topic_count,
             )
         except (ModelCallError, ContractError) as error:
@@ -218,8 +249,8 @@ class TrackService:
             )
             session.commit()
             raise
-        assigned = {topic_id for track in result.output.tracks for topic_id in track.topic_ids}
-        run.track_count = len(result.output.tracks)
+        assigned = {topic_id for track in output.tracks for topic_id in track.topic_ids}
+        run.track_count = len(output.tracks)
         run.unassigned_topic_count = len(set(x.id for x in topics) - assigned)
         run.status = TaskStatus.COMPLETED
         run.finished_at = datetime.now(UTC)
@@ -229,19 +260,230 @@ class TrackService:
             "topics": len(topics),
             "tracks": run.track_count,
             "unassigned_topics": run.unassigned_topic_count,
+            "build_mode": build_mode,
+            "fallback": fallback_stats,
         }
         record_event(
             session,
             event_type="track.run.completed",
             message="Topic-to-Track run completed",
             pipeline_run_id=pipeline.id,
-            model_run_id=model_run.id,
+            model_run_id=run.model_run_id,
             entity_type="track_build_run",
             entity_id=run.id,
             details=pipeline.counters,
         )
         session.commit()
         return _build_payload(run, resumed=False)
+
+    def _call_track_model(
+        self,
+        *,
+        session: Session,
+        prompt: str,
+        topics: list[Topic],
+        topic_refs: dict[str, uuid.UUID],
+    ):
+        ref_by_topic_id = {topic_id: ref for ref, topic_id in topic_refs.items()}
+        return self.client.complete_structured(
+            messages=[
+                {"role": "system", "content": prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "topics": [
+                                _topic_payload(
+                                    session,
+                                    topic,
+                                    topic_ref=ref_by_topic_id[topic.id],
+                                )
+                                for topic in topics
+                            ]
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            output_model=CompactTrackBuildOutput,
+            model=self.config.stage4.model,
+            max_tokens=self.config.stage4.generation_max_output_tokens,
+            enable_thinking=False,
+        )
+
+    def _build_with_fallback(
+        self,
+        *,
+        session: Session,
+        pipeline: PipelineRun,
+        run: TrackBuildRun,
+        topics: list[Topic],
+        topic_refs: dict[str, uuid.UUID],
+        generation_prompt: str,
+        generation_prompt_version: str,
+        merge_prompt: str,
+        merge_prompt_version: str,
+    ) -> tuple[TrackBuildOutput, uuid.UUID | None, dict[str, Any]]:
+        groups = _topic_work_package_groups(session, run.research_plan_id, topics)
+        completed_local_outputs = []
+        completed_model_run_id = None
+        completed_groups = 0
+        failed_groups = 0
+        for group_name, group_topics in groups:
+            group_ref_map = {
+                ref: topic_id
+                for ref, topic_id in topic_refs.items()
+                if topic_id in {topic.id for topic in group_topics}
+            }
+            group_fp = fingerprint(
+                group_name,
+                [(str(topic.id), topic.topic_fingerprint) for topic in group_topics],
+                generation_prompt_version,
+            )
+            local_model_run = _new_model_run(
+                pipeline.id,
+                "track_generation_fallback_local",
+                self.config.stage4.model,
+                generation_prompt_version,
+                group_fp,
+            )
+            session.add(local_model_run)
+            session.flush()
+            try:
+                local_result = self._call_track_model(
+                    session=session,
+                    prompt=generation_prompt,
+                    topics=group_topics,
+                    topic_refs=group_ref_map,
+                )
+                _complete_model_run(local_model_run, local_result)
+                completed_local_outputs.extend(local_result.output.tracks)
+                completed_model_run_id = local_model_run.id
+                completed_groups += 1
+                record_event(
+                    session,
+                    event_type="track.fallback.local.completed",
+                    message="Local Track fallback group completed",
+                    pipeline_run_id=pipeline.id,
+                    model_run_id=local_model_run.id,
+                    entity_type="track_build_run",
+                    entity_id=run.id,
+                    details={
+                        "group": group_name,
+                        "topic_count": len(group_topics),
+                        "track_count": len(local_result.output.tracks),
+                    },
+                )
+            except (ModelCallError, ContractError) as error:
+                failed_groups += 1
+                _fail_model_run_only(local_model_run, error)
+                record_event(
+                    session,
+                    event_type="track.fallback.local.failed",
+                    message="Local Track fallback group failed and was skipped",
+                    level="WARNING",
+                    pipeline_run_id=pipeline.id,
+                    model_run_id=local_model_run.id,
+                    entity_type="track_build_run",
+                    entity_id=run.id,
+                    details={"group": group_name, "error_message": str(error)},
+                )
+            session.commit()
+
+        local_tracks = _combine_exact_track_names(completed_local_outputs)
+        if not local_tracks:
+            raise ContractError("Track fallback produced no usable local Tracks")
+
+        local_refs = {f"L{index}": item for index, item in enumerate(local_tracks, 1)}
+        merge_fp = fingerprint(
+            [(ref, item.name, item.refs) for ref, item in local_refs.items()],
+            merge_prompt_version,
+        )
+        merge_model_run = _new_model_run(
+            pipeline.id,
+            "track_generation_fallback_merge",
+            self.config.stage4.model,
+            merge_prompt_version,
+            merge_fp,
+        )
+        session.add(merge_model_run)
+        session.flush()
+        try:
+            merge_result = self.client.complete_structured(
+                messages=[
+                    {"role": "system", "content": merge_prompt},
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "tracks": [
+                                    {
+                                        "track_ref": ref,
+                                        "name": item.name,
+                                        "topic_refs": item.refs,
+                                    }
+                                    for ref, item in local_refs.items()
+                                ]
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+                output_model=CompactTrackBuildOutput,
+                model=self.config.stage4.model,
+                max_tokens=self.config.stage4.generation_max_output_tokens,
+                enable_thinking=False,
+            )
+            _complete_model_run(merge_model_run, merge_result)
+            merged_tracks = _expand_local_track_refs(merge_result.output, local_refs)
+            if merged_tracks:
+                local_tracks = merged_tracks
+            completed_model_run_id = merge_model_run.id
+            merge_applied = bool(merged_tracks)
+            record_event(
+                session,
+                event_type="track.fallback.merge.completed",
+                message="Local Track fallback results merged",
+                pipeline_run_id=pipeline.id,
+                model_run_id=merge_model_run.id,
+                entity_type="track_build_run",
+                entity_id=run.id,
+                details={
+                    "local_track_count": len(local_refs),
+                    "merged_track_count": len(local_tracks),
+                },
+            )
+        except (ModelCallError, ContractError) as error:
+            merge_applied = False
+            _fail_model_run_only(merge_model_run, error)
+            record_event(
+                session,
+                event_type="track.fallback.merge.failed",
+                message="Track fallback merge failed; local Tracks were retained",
+                level="WARNING",
+                pipeline_run_id=pipeline.id,
+                model_run_id=merge_model_run.id,
+                entity_type="track_build_run",
+                entity_id=run.id,
+                details={"error_message": str(error), "local_track_count": len(local_tracks)},
+            )
+        session.commit()
+        return (
+            _expand_topic_refs(
+                session,
+                CompactTrackBuildOutput(tracks=local_tracks),
+                topic_refs,
+                {topic.id: topic for topic in topics},
+            ),
+            completed_model_run_id,
+            {
+                "group_count": len(groups),
+                "completed_groups": completed_groups,
+                "failed_groups": failed_groups,
+                "local_track_count": len(local_refs),
+                "merge_applied": merge_applied,
+            },
+        )
 
     def _persist_tracks(
         self,
@@ -338,6 +580,7 @@ class TrackService:
     def analyze(
         self, session: Session, *, plan_id: uuid.UUID, limit: int | None = None
     ) -> dict[str, Any]:
+        reconcile_stale_pipeline_runs(session)
         statement = (
             select(CandidateTrack)
             .where(
@@ -353,17 +596,31 @@ class TrackService:
         prompt_version = _prompt_version(self.config.stage4.prompts.track_analysis, prompt)
         completed = failed = skipped = 0
         for track in tracks:
-            payload, event_ids, stats = _analysis_input(session, track)
-            input_fp = fingerprint(
-                track.track_fingerprint, payload, prompt_version, self.config.stage4.model
-            )
-            old = session.scalar(
-                select(CandidateTrackAnalysis).where(
-                    CandidateTrackAnalysis.candidate_track_id == track.id,
-                    CandidateTrackAnalysis.input_fingerprint == input_fp,
-                    CandidateTrackAnalysis.processor_version == ANALYSIS_PROCESSOR_VERSION,
+            try:
+                payload, event_ids, stats = _analysis_input(session, track)
+                input_fp = fingerprint(
+                    track.track_fingerprint, payload, prompt_version, self.config.stage4.model
                 )
-            )
+                old = session.scalar(
+                    select(CandidateTrackAnalysis).where(
+                        CandidateTrackAnalysis.candidate_track_id == track.id,
+                        CandidateTrackAnalysis.input_fingerprint == input_fp,
+                        CandidateTrackAnalysis.processor_version == ANALYSIS_PROCESSOR_VERSION,
+                    )
+                )
+            except (ContractError, KeyError, TypeError, ValueError) as error:
+                failed += 1
+                record_event(
+                    session,
+                    event_type="track.analysis.skipped",
+                    message="Candidate Track analysis input was invalid and skipped",
+                    level="WARNING",
+                    entity_type="candidate_track",
+                    entity_id=track.id,
+                    details={"track_name": track.name, "error_message": str(error)},
+                )
+                session.commit()
+                continue
             if old and old.status == TaskStatus.COMPLETED:
                 skipped += 1
                 continue
@@ -457,6 +714,20 @@ class TrackService:
                 )
                 completed += 1
             except (ModelCallError, ContractError) as error:
+                model_run.status = (
+                    TaskStatus.FAILED_RETRYABLE
+                    if isinstance(error, ModelCallError) and error.retryable
+                    else TaskStatus.FAILED_TERMINAL
+                )
+                model_run.error_code = getattr(error, "code", "track_analysis_contract_error")
+                model_run.error_message = str(error)
+                if isinstance(error, ModelCallError):
+                    (
+                        model_run.request_id,
+                        model_run.usage,
+                        model_run.raw_response,
+                    ) = error.response_metadata()
+                model_run.finished_at = datetime.now(UTC)
                 analysis.status = (
                     TaskStatus.FAILED_RETRYABLE
                     if isinstance(error, ModelCallError) and error.retryable
@@ -564,6 +835,72 @@ def _topic_payload(
     }
     payload["topic_ref" if topic_ref else "topic_id"] = topic_ref or str(topic.id)
     return payload
+
+
+def _topic_work_package_groups(
+    session: Session, plan_id: uuid.UUID, topics: list[Topic]
+) -> list[tuple[str, list[Topic]]]:
+    topic_ids = [topic.id for topic in topics]
+    rows = session.execute(
+        select(
+            TopicEvent.topic_id,
+            ResearchWorkPackage.id,
+            ResearchWorkPackage.sequence_no,
+        )
+        .join(Event, Event.id == TopicEvent.event_id)
+        .join(PageAnalysis, PageAnalysis.id == Event.page_analysis_id)
+        .join(PageCapture, PageCapture.id == PageAnalysis.page_capture_id)
+        .join(UrlDiscovery, UrlDiscovery.url_candidate_id == PageCapture.url_candidate_id)
+        .join(
+            ResearchWorkPackage,
+            ResearchWorkPackage.id == UrlDiscovery.research_work_package_id,
+        )
+        .where(
+            TopicEvent.topic_id.in_(topic_ids),
+            ResearchWorkPackage.research_plan_id == plan_id,
+        )
+        .order_by(ResearchWorkPackage.sequence_no, ResearchWorkPackage.id)
+    )
+    primary_group: dict[uuid.UUID, tuple[int, uuid.UUID]] = {}
+    for topic_id, work_package_id, sequence_no in rows:
+        primary_group.setdefault(topic_id, (sequence_no, work_package_id))
+    grouped: dict[str, list[Topic]] = defaultdict(list)
+    for topic in topics:
+        group = primary_group.get(topic.id)
+        key = f"W{group[0]}:{group[1]}" if group else "unscoped"
+        grouped[key].append(topic)
+    return sorted(grouped.items(), key=lambda item: item[0])
+
+
+def _combine_exact_track_names(
+    tracks: list[CompactCandidateTrackOutput],
+) -> list[CompactCandidateTrackOutput]:
+    combined: dict[str, CompactCandidateTrackOutput] = {}
+    for track in tracks:
+        key = " ".join(track.name.split()).casefold()
+        existing = combined.get(key)
+        if existing is None:
+            combined[key] = track.model_copy(deep=True)
+        else:
+            existing.refs = list(dict.fromkeys([*existing.refs, *track.refs]))
+    return list(combined.values())
+
+
+def _expand_local_track_refs(
+    output: CompactTrackBuildOutput,
+    local_refs: dict[str, CompactCandidateTrackOutput],
+) -> list[CompactCandidateTrackOutput]:
+    expanded = []
+    for proposed in output.tracks:
+        members = [local_refs[ref] for ref in proposed.refs if ref in local_refs]
+        topic_refs = list(
+            dict.fromkeys(topic_ref for member in members for topic_ref in member.refs)
+        )
+        if topic_refs:
+            expanded.append(
+                CompactCandidateTrackOutput(name=proposed.name, refs=topic_refs)
+            )
+    return _combine_exact_track_names(expanded)
 
 
 def _expand_topic_refs(
@@ -886,16 +1223,24 @@ def _complete_model_run(model_run: ModelRun, result: Any) -> None:
     model_run.finished_at = datetime.now(UTC)
 
 
-def _fail(model_run: ModelRun, run: TrackBuildRun, pipeline: PipelineRun, error: Exception) -> None:
-    status = (
+def _fail_model_run_only(model_run: ModelRun, error: Exception) -> None:
+    model_run.status = (
         TaskStatus.FAILED_RETRYABLE
         if isinstance(error, ModelCallError) and error.retryable
         else TaskStatus.FAILED_TERMINAL
     )
-    model_run.status = status
     model_run.error_code = getattr(error, "code", "track_contract_error")
     model_run.error_message = str(error)
+    if isinstance(error, ModelCallError):
+        model_run.request_id, model_run.usage, model_run.raw_response = (
+            error.response_metadata()
+        )
     model_run.finished_at = datetime.now(UTC)
+
+
+def _fail(model_run: ModelRun, run: TrackBuildRun, pipeline: PipelineRun, error: Exception) -> None:
+    _fail_model_run_only(model_run, error)
+    status = model_run.status
     run.status = status
     run.error_code = model_run.error_code
     run.error_message = str(error)

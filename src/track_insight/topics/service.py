@@ -16,7 +16,12 @@ from track_insight.core.errors import ContractError, ModelCallError
 from track_insight.core.fingerprints import fingerprint
 from track_insight.infrastructure.bailian.client import BailianClient
 from track_insight.infrastructure.events import record_event
-from track_insight.infrastructure.jobs import complete_job, enqueue_job, fail_job
+from track_insight.infrastructure.jobs import (
+    complete_job,
+    enqueue_job,
+    fail_job,
+    reconcile_stale_pipeline_runs,
+)
 from track_insight.infrastructure.models import (
     Event,
     Job,
@@ -54,6 +59,7 @@ class TopicService:
         batch_size: int | None = None,
         resume: bool = False,
     ) -> dict[str, Any]:
+        reconcile_stale_pipeline_runs(session)
         event_limit = min(
             max_events or self.config.stage3.max_events_per_run,
             self.config.stage3.max_events_per_run,
@@ -95,7 +101,12 @@ class TopicService:
                 TopicBuildRun.processor_version == TOPIC_PROCESSOR_VERSION,
             )
         )
-        if build_run is not None and build_run.status == TaskStatus.COMPLETED and not resume:
+        if (
+            build_run is not None
+            and build_run.status == TaskStatus.COMPLETED
+            and build_run.error_code != "partial_batch_failure"
+            and not resume
+        ):
             return _run_payload(build_run, resumed=True)
         if build_run is not None and build_run.status == TaskStatus.RUNNING and not resume:
             raise ContractError("an unfinished Topic build exists; rerun with --resume")
@@ -181,7 +192,8 @@ class TopicService:
                 )
             )
         )
-        if failed_batches == 0:
+        snapshot_activated = bool(candidates)
+        if snapshot_activated:
             _activate_topic_snapshot(session, build_run)
 
         active_topics = int(
@@ -224,7 +236,7 @@ class TopicService:
             "failed_batches": failed_batches,
             "topics": active_topics,
             "unassigned_events": build_run.unassigned_event_count,
-            "snapshot_activated": failed_batches == 0,
+            "snapshot_activated": snapshot_activated,
         }
         pipeline.finished_at = datetime.now(UTC)
         record_event(

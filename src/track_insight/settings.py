@@ -103,6 +103,7 @@ class Stage3Config(BaseModel):
 
 class Stage4PromptConfig(BaseModel):
     track_generation: Path
+    track_merge: Path
     track_analysis: Path
 
 

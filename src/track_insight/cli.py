@@ -19,6 +19,12 @@ from track_insight.infrastructure.bailian.client import BailianClient
 from track_insight.infrastructure.database import check_database, session_scope
 from track_insight.infrastructure.logging import configure_logging
 from track_insight.infrastructure.models import PipelineRun, RunEvent
+from track_insight.pipeline import (
+    FullPipelineOptions,
+    FullPipelineService,
+    PipelineExecutionError,
+    full_pipeline_status,
+)
 from track_insight.planning.contracts import ResearchScope
 from track_insight.planning.service import PlanningService, validate_plan
 from track_insight.reporting.dashboard import build_track_dashboard
@@ -60,6 +66,78 @@ def config_show(config_path: Path = Path("config/poc.yaml")) -> None:
 def db_check() -> None:
     check_database()
     typer.echo("database connection ok")
+
+
+@app.command("pipeline-run")
+def pipeline_run_all(
+    plan_id: Annotated[str | None, typer.Option("--plan-id")] = None,
+    resume: bool = typer.Option(False, "--resume"),
+    regions: Annotated[list[str] | None, typer.Option("--region")] = None,
+    industries: Annotated[list[str] | None, typer.Option("--industry")] = None,
+    start_date: Annotated[str | None, typer.Option("--start-date")] = None,
+    end_date: Annotated[str | None, typer.Option("--end-date")] = None,
+    output: Annotated[Path, typer.Option("--output", "-o")] = Path(
+        "reports/track_dashboard_latest.html"
+    ),
+    page_batch_size: Annotated[int, typer.Option(min=1, max=1000)] = 100,
+    event_batch_size: Annotated[int, typer.Option(min=1, max=1000)] = 40,
+    workers: Annotated[int | None, typer.Option(min=1, max=8)] = None,
+    queue_timeout_seconds: Annotated[int, typer.Option(min=60, max=86400)] = 1800,
+    config_path: Path = Path("config/poc.yaml"),
+) -> None:
+    """Run or resume the complete research-to-dashboard pipeline."""
+    config = load_poc_config(config_path)
+    parsed_plan_id = _uuid(plan_id) if plan_id else None
+    scope_overridden = any((regions, industries, start_date, end_date))
+    if parsed_plan_id is not None and scope_overridden:
+        raise typer.BadParameter("scope options cannot be combined with --plan-id")
+    if resume and parsed_plan_id is None and scope_overridden:
+        raise typer.BadParameter("scope options cannot be combined with automatic --resume")
+    scope = None
+    if parsed_plan_id is None and not resume:
+        scope = ResearchScope(
+            regions=regions or config.scope.regions,
+            industry_scopes=industries or config.scope.industry_scopes,
+            start_date=_date(start_date) if start_date else config.scope.start_date,
+            end_date=_date(end_date) if end_date else config.scope.end_date,
+        )
+    effective_workers = workers or config.bailian.max_concurrency
+    options = FullPipelineOptions(
+        output=output,
+        page_work_limit=page_batch_size,
+        event_work_limit=event_batch_size,
+        event_workers=effective_workers,
+        queue_timeout_seconds=float(queue_timeout_seconds),
+    )
+    service = FullPipelineService(
+        config=config,
+        client_factory=lambda: _build_client(config),
+        progress=_pipeline_progress,
+    )
+    try:
+        result = service.run(
+            scope=scope,
+            plan_id=parsed_plan_id,
+            resume=resume,
+            options=options,
+        )
+    except PipelineExecutionError as error:
+        typer.echo(str(error), err=True)
+        typer.echo(f"resume: {error.resume_command}", err=True)
+        raise typer.Exit(code=1) from error
+    except TrackInsightError as error:
+        raise typer.Exit(code=1) from _echo_error(error)
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+@app.command("pipeline-status")
+def pipeline_plan_status(
+    plan_id: Annotated[str | None, typer.Option("--plan-id")] = None,
+) -> None:
+    """Show the latest complete-pipeline run and its recovery state."""
+    with session_scope() as session:
+        result = full_pipeline_status(session, _uuid(plan_id) if plan_id else None)
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 @app.command("research-plan-build")
@@ -173,7 +251,7 @@ def page_fetch_work(
         if client is not None:
             client.close()
     typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
-    if result["failed"]:
+    if result["failed"] and result["completed"] == 0:
         raise typer.Exit(code=1)
 
 
@@ -216,7 +294,7 @@ def event_extract_work(
         "event_count": sum(int(item["event_count"]) for item in results),
     }
     typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
-    if result["failed"]:
+    if result["failed"] and result["completed"] == 0:
         raise typer.Exit(code=1)
 
 
@@ -429,6 +507,17 @@ def _run_event_extract_worker(config: PocConfig, limit: int) -> dict[str, int | 
         return EventService(client=client, config=config).extract_work(limit=limit)
     finally:
         client.close()
+
+
+def _pipeline_progress(event: str, payload: dict) -> None:
+    if event == "pipeline.stage.started":
+        typer.echo(f"[pipeline] START {payload['stage']}")
+    elif event == "pipeline.stage.completed":
+        typer.echo(f"[pipeline] DONE  {payload['stage']}")
+    elif event.endswith(".batch"):
+        typer.echo(f"[pipeline] {event}: {json.dumps(payload, ensure_ascii=False)}")
+    elif event.endswith(".retry"):
+        typer.echo(f"[pipeline] RETRY {json.dumps(payload, ensure_ascii=False)}")
 
 
 def _build_client(config: PocConfig) -> BailianClient:

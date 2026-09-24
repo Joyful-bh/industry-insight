@@ -7,7 +7,14 @@ from sqlalchemy.orm import Session
 
 from track_insight.core.enums import TaskStatus
 from track_insight.core.fingerprints import fingerprint
-from track_insight.infrastructure.models import Job
+from track_insight.infrastructure.models import (
+    CandidateTrackAnalysis,
+    Job,
+    ModelRun,
+    PipelineRun,
+    TopicBuildRun,
+    TrackBuildRun,
+)
 
 
 def enqueue_job(
@@ -173,3 +180,64 @@ def requeue_expired_jobs(session: Session, now: datetime | None = None) -> int:
         )
     )
     return int(result.rowcount or 0)
+
+
+def reconcile_stale_pipeline_runs(
+    session: Session,
+    *,
+    now: datetime | None = None,
+    stale_after_seconds: int = 21600,
+) -> int:
+    """Close abandoned runs while leaving live leased work untouched."""
+    effective_now = now or datetime.now(UTC)
+    cutoff = effective_now - timedelta(seconds=stale_after_seconds)
+    active_job_exists = (
+        select(Job.id)
+        .where(
+            Job.pipeline_run_id == PipelineRun.id,
+            Job.status == TaskStatus.RUNNING,
+            Job.lease_until.is_not(None),
+            Job.lease_until >= effective_now,
+        )
+        .exists()
+    )
+    stale_ids = list(
+        session.scalars(
+            select(PipelineRun.id).where(
+                PipelineRun.status == TaskStatus.RUNNING,
+                PipelineRun.started_at.is_not(None),
+                PipelineRun.started_at < cutoff,
+                ~active_job_exists,
+            )
+        )
+    )
+    if not stale_ids:
+        return 0
+    session.execute(
+        update(PipelineRun)
+        .where(PipelineRun.id.in_(stale_ids))
+        .values(status=TaskStatus.FAILED_RETRYABLE, finished_at=effective_now)
+    )
+    session.execute(
+        update(ModelRun)
+        .where(ModelRun.pipeline_run_id.in_(stale_ids), ModelRun.status == TaskStatus.RUNNING)
+        .values(
+            status=TaskStatus.FAILED_RETRYABLE,
+            error_code="stale_pipeline",
+            error_message="Run stopped without recording completion",
+            finished_at=effective_now,
+        )
+    )
+    for model in (TopicBuildRun, TrackBuildRun, CandidateTrackAnalysis):
+        session.execute(
+            update(model)
+            .where(model.pipeline_run_id.in_(stale_ids), model.status == TaskStatus.RUNNING)
+            .values(
+                status=TaskStatus.FAILED_RETRYABLE,
+                error_code="stale_pipeline",
+                error_message="Run stopped without recording completion",
+                finished_at=effective_now,
+            )
+        )
+    session.flush()
+    return len(stale_ids)

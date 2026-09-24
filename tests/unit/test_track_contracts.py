@@ -7,12 +7,49 @@ from track_insight.tracks.contracts import (
     TrackBuildOutput,
 )
 from track_insight.tracks.service import (
+    _combine_exact_track_names,
     _compact_text,
     _event_ids_for_topic_ids,
+    _expand_local_track_refs,
     _expand_topic_refs,
     _normalize_build_output,
     _validate_build,
 )
+
+
+def test_local_fallback_combines_exact_duplicate_track_names() -> None:
+    output = CompactTrackBuildOutput.model_validate(
+        {
+            "tracks": [
+                {"name": "工业视觉质检", "refs": ["T1"]},
+                {"name": " 工业视觉质检 ", "refs": ["T2", "T1"]},
+            ]
+        }
+    )
+
+    combined = _combine_exact_track_names(output.tracks)
+
+    assert len(combined) == 1
+    assert combined[0].refs == ["T1", "T2"]
+
+
+def test_fallback_merge_expands_local_refs_to_topic_refs() -> None:
+    local = CompactTrackBuildOutput.model_validate(
+        {
+            "tracks": [
+                {"name": "工业视觉设备", "refs": ["T1", "T2"]},
+                {"name": "工业视觉软件", "refs": ["T3"]},
+            ]
+        }
+    ).tracks
+    merged = CompactTrackBuildOutput.model_validate(
+        {"tracks": [{"name": "工业视觉质检", "refs": ["L1", "L2", "UNKNOWN"]}]}
+    )
+
+    expanded = _expand_local_track_refs(merged, {"L1": local[0], "L2": local[1]})
+
+    assert expanded[0].name == "工业视觉质检"
+    assert expanded[0].refs == ["T1", "T2", "T3"]
 
 
 def test_compact_track_refs_expand_to_topic_ids() -> None:

@@ -59,4 +59,5 @@ stage4:
   analysis_max_output_tokens: 8192
   prompts:
     track_generation: config/prompts/track_generation_v1.md
+    track_merge: config/prompts/track_merge_v1.md
     track_analysis: config/prompts/track_analysis_v1.md
