@@ -38,7 +38,6 @@ htmlcov/
 # Project-local runtime and test artifacts
 .runtime-tests/
 .test-tmp/
-.uv-cache/
 data/
 reports/
 logs/

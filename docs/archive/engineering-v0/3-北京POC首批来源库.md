@@ -101,14 +101,14 @@
 修改区域、回采月份或文档格式后执行：
 
 ```powershell
-uv run track-insight scope-validate
+python -m track_insight scope-validate
 ```
 
 新增或修改来源后执行：
 
 ```powershell
-uv run track-insight source-validate
-uv run track-insight source-sync
+python -m track_insight source-validate
+python -m track_insight source-sync
 ```
 
 每个来源通过稳定 `code` 识别。修改已有来源时保留 `code`；增加新来源时使用新的 `code`。同步过程会计算配置指纹并保留配置版本。

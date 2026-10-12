@@ -65,17 +65,17 @@ tests/                   单元、集成和真实 API 测试
 
 - Python 3.12 或 3.13；
 - PostgreSQL 17；
-- `uv`，或其他能够安装 `pyproject.toml` 的 Python 包管理工具；
+- 支持 `pip` 的 Python 环境；
 - 阿里云百炼 API Key。
 
 ## 初始化
 
 ```powershell
 Copy-Item .env.example .env
-uv sync --extra dev
+python -m pip install -e ".[dev]"
 docker compose up -d postgres
-uv run alembic upgrade head
-uv run track-insight db-check
+python -m alembic upgrade head
+python -m track_insight db-check
 ```
 
 在 `.env` 中配置：
@@ -88,18 +88,30 @@ BAILIAN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 
 运行参数位于 `config/poc.yaml`。`BAILIAN_MODEL` 和 `BAILIAN_BASE_URL` 环境变量会覆盖配置文件中的对应值。
 
+`stage4.target_track_boundary` 定义正式赛道所对应的目标企业范围。Track 生成、降级归并和最终定义都会收到当前研究计划的 `industry_scopes` 及这条边界；修改边界会改变构建指纹，不会复用其他范围下的赛道结果。
+
+正式赛道构建在候选生成、辅助信号补关联和定义之后，执行动态粗粒度归并：生成本轮平面市场目录、分批归属、审核合并组，再由程序合并。目录随本轮输入生成，不依赖固定赛道清单；不同供给角色不合并，拒绝的组保留原候选，核心和辅助 Topic 均完整保留。
+
+全国采集配置为 `config/national.yaml`，时间窗口为 2025-10-09 至 2026-10-09。
+“全国”展开为国家级和中国大陆31个省级地区，基础规划按每批4个地区并发生成，每地区4至6条查询。
+程序统一查询地区与时间，并校验独立地区任务、政策来源任务和预算；规划不合格时最多修复一次。
+搜索结束后统计各地区任务状态、保留正文链接及已知发布日期分布，最多补查8个薄弱地区、每地区2条新查询、仅一轮。
+查询地区标签表示调查目标，不证明网页事实发生在该地区；未知日期也不视为时间覆盖达标。失败或预算停止的任务会单独统计，不以补查掩盖。
+
+赛道质量实验的保留结论与回归入口位于 `experiments/track_quality/`。回归脚本不接入正式 `pipeline-run`，动态归并使用正式 `tracks.markets` 模块。
+
 ## 一键运行与恢复
 
 使用配置文件中的默认研究范围执行完整流程：
 
 ```powershell
-uv run track-insight pipeline-run
+python -m track_insight pipeline-run
 ```
 
 也可以直接指定研究范围：
 
 ```powershell
-uv run track-insight pipeline-run `
+python -m track_insight pipeline-run `
   --region 北京市 `
   --industry 制造业 `
   --start-date 2024-09-16 `
@@ -111,20 +123,20 @@ uv run track-insight pipeline-run `
 运行失败或中断后，直接恢复最近一次未完成流程：
 
 ```powershell
-uv run track-insight pipeline-run --resume
+python -m track_insight pipeline-run --resume
 ```
 
 也可以指定研究计划恢复：
 
 ```powershell
-uv run track-insight pipeline-run --plan-id <plan-id> --resume
+python -m track_insight pipeline-run --plan-id <plan-id> --resume
 ```
 
 查看统一流程状态：
 
 ```powershell
-uv run track-insight pipeline-status
-uv run track-insight pipeline-status --plan-id <plan-id>
+python -m track_insight pipeline-status
+python -m track_insight pipeline-status --plan-id <plan-id>
 ```
 
 统一入口根据数据库中的任务状态复用已经完成的结果，不会重新执行已经成功且输入未变化的模型任务。页面或模型任务发生可重试错误时，程序会在设定的等待时间内自动继续；超过等待时间后保留恢复状态并退出。
@@ -136,14 +148,14 @@ uv run track-insight pipeline-status --plan-id <plan-id>
 ### 1. 生成并校验研究计划
 
 ```powershell
-uv run track-insight research-plan-build
-uv run track-insight research-plan-validate <plan-id>
+python -m track_insight research-plan-build
+python -m track_insight research-plan-validate <plan-id>
 ```
 
 也可以在生成计划时指定范围：
 
 ```powershell
-uv run track-insight research-plan-build `
+python -m track_insight research-plan-build `
   --region 北京市 `
   --industry 制造业 `
   --start-date 2024-09-16 `
@@ -153,19 +165,35 @@ uv run track-insight research-plan-build `
 ### 2. 搜索和覆盖检查
 
 ```powershell
-uv run track-insight search-run <plan-id>
-uv run track-insight url-status <plan-id>
+python -m track_insight search-run <plan-id>
+python -m track_insight url-status <plan-id>
 ```
 
 中断后可使用 `search-run <plan-id> --resume` 继续。
 
+搜索使用 `bailian.max_concurrency` 控制工作包并发数（全国配置为4）。每个工作包内的查询仍串行执行，独立数据库会话保存结果；设为1可串行运行。修改配置后需重新启动命令才会生效。
+
+默认使用百炼联网搜索，`search.selection: citations` 由程序收集综述引用的 URL，
+直接作为待核验候选交给页面下载、清洗及事件抽取，不调用独立 URL 审核模型。
+引用只表示候选选择，不表示网页相关性或日期已核验。所有召回 URL 和原始综述仍保存到数据库。
+`search.selection: model_review` 可启用逐网页审核；OpenSearch 作为可选搜索接口保留。
+
+只运行全国搜索阶段的小批任务：
+
+```powershell
+python -m track_insight search-run <plan-id> --config-path config/national.yaml --max-work-packages 6 --max-searches 1
+```
+
+`max-searches` 限制每个工作包检查的任务数，已完成任务会跳过。此命令仅召回并选择候选网页，
+正文获取由后续 `page-enqueue` 和 `page-fetch-work` 执行。
+
 ### 3. 获取页面正文并提取事件
 
 ```powershell
-uv run track-insight page-enqueue <plan-id> --limit 1000
-uv run track-insight page-fetch-work --limit 1000
-uv run track-insight event-extract-work --limit 1000 --workers 4
-uv run track-insight stage2-status <plan-id>
+python -m track_insight page-enqueue <plan-id> --limit 1000
+python -m track_insight page-fetch-work --limit 1000
+python -m track_insight event-extract-work --limit 1000 --workers 4
+python -m track_insight stage2-status <plan-id>
 ```
 
 页面获取和事件提取使用任务队列。若状态中仍有待处理任务，需要重复执行对应的 `*-work` 命令。
@@ -173,11 +201,11 @@ uv run track-insight stage2-status <plan-id>
 ### 4. 生成 Topic 和候选赛道
 
 ```powershell
-uv run track-insight topic-build <plan-id>
-uv run track-insight topic-status <plan-id>
-uv run track-insight track-build <plan-id>
-uv run track-insight track-analyze <plan-id>
-uv run track-insight track-status <plan-id>
+python -m track_insight topic-build <plan-id>
+python -m track_insight topic-status <plan-id>
+python -m track_insight track-build <plan-id>
+python -m track_insight track-analyze <plan-id>
+python -m track_insight track-status <plan-id>
 ```
 
 Topic 构建中断后可使用 `topic-build <plan-id> --resume` 继续。
@@ -185,19 +213,19 @@ Topic 构建中断后可使用 `topic-build <plan-id> --resume` 继续。
 ### 5. 生成看板
 
 ```powershell
-uv run track-insight dashboard-build <plan-id> `
+python -m track_insight dashboard-build <plan-id> `
   --output reports/track_dashboard_latest.html
 ```
 
 ## 运行检查
 
 ```powershell
-uv run track-insight config-show
-uv run track-insight run-list
-uv run track-insight run-events <pipeline-run-id>
-uv run track-insight event-list <plan-id>
-uv run track-insight topic-list <plan-id>
-uv run track-insight track-list <plan-id>
+python -m track_insight config-show
+python -m track_insight run-list
+python -m track_insight run-events <pipeline-run-id>
+python -m track_insight event-list <plan-id>
+python -m track_insight topic-list <plan-id>
+python -m track_insight track-list <plan-id>
 ```
 
 日志同时写入终端、`logs/track-insight.jsonl` 和数据库 `run_event` 表。
@@ -205,8 +233,8 @@ uv run track-insight track-list <plan-id>
 ## 测试
 
 ```powershell
-uv run pytest
-uv run ruff check src tests
+python -m pytest
+python -m ruff check src tests
 ```
 
 `tests/live` 会调用真实 API 并产生费用，需单独按测试标记执行。

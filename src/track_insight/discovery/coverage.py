@@ -1,4 +1,6 @@
+import re
 from collections import Counter
+from datetime import date
 from urllib.parse import urlsplit
 
 from sqlalchemy import select
@@ -15,6 +17,7 @@ from track_insight.infrastructure.models import (
     UrlCandidate,
     UrlDiscovery,
 )
+from track_insight.planning.coverage import query_is_regional
 from track_insight.settings import PocConfig
 
 
@@ -60,6 +63,56 @@ def build_coverage_audit(
     domain_counts = Counter(urlsplit(item.canonical_url).hostname or "" for item in candidates)
     missing = sorted(set(config.coverage.required_source_classes) - set(source_counts))
     warnings = [f"missing source class: {value}" for value in missing]
+    region_coverage = {}
+    result_by_task = {}
+    for result in results:
+        result_by_task.setdefault(result.search_task_id, []).append(result)
+    for region in plan.regions:
+        regional = [
+            task
+            for task in tasks
+            if task.target_regions == [region] and query_is_regional(task.query, region)
+        ]
+        retained = [
+            result
+            for task in regional
+            for result in result_by_task.get(task.id, [])
+            if result.decision in {SearchDecision.KEEP, SearchDecision.MAYBE}
+            and result.url_type == "content_page"
+        ]
+        dates = []
+        for result in retained:
+            match = re.search(r"\d{4}-\d{2}-\d{2}", result.publish_date or "")
+            if match:
+                try:
+                    dates.append(date.fromisoformat(match[0]))
+                except ValueError:
+                    pass
+        middle = plan.start_date + (plan.end_date - plan.start_date) // 2
+        first = sum(plan.start_date <= value <= middle for value in dates)
+        second = sum(middle < value <= plan.end_date for value in dates)
+        reasons = []
+        if not retained:
+            reasons.append("no_retained_content")
+        elif not any(result.source_class == "government" for result in retained):
+            reasons.append("no_government_content")
+        if first + second >= 4 and (first == 0 or second == 0):
+            reasons.append("time_distribution_gap")
+        row = {
+            "search_tasks": len(regional),
+            "completed_searches": sum(task.status == TaskStatus.COMPLETED for task in regional),
+            "failed_searches": sum(str(task.status).startswith("failed") for task in regional),
+            "budget_stopped_searches": sum(
+                task.completion_reason == "candidate_budget_reached" for task in regional
+            ),
+            "retained_content_urls": len({result.url for result in retained}),
+            "first_half_dated_results": first,
+            "second_half_dated_results": second,
+            "unknown_publication_dates": len(retained) - len(dates),
+            "supplement_reasons": reasons,
+        }
+        region_coverage[region] = row
+        warnings.extend(f"regional coverage {region}: {reason}" for reason in reasons)
     if candidates and domain_counts:
         domain, count = domain_counts.most_common(1)[0]
         if count / len(candidates) >= config.coverage.dominant_domain_warning_ratio:
@@ -85,6 +138,7 @@ def build_coverage_audit(
         ],
         missing_source_classes=missing,
         warnings=warnings,
+        region_coverage=region_coverage,
     )
     if persist:
         plan.coverage_audit = audit.model_dump(mode="json")

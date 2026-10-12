@@ -98,8 +98,8 @@ class PipelineExecutionError(TrackInsightError):
     @property
     def resume_command(self) -> str:
         if self.plan_id is not None:
-            return f"uv run track-insight pipeline-run --plan-id {self.plan_id} --resume"
-        return "uv run track-insight pipeline-run --resume"
+            return f"python -m track_insight pipeline-run --plan-id {self.plan_id} --resume"
+        return "python -m track_insight pipeline-run --resume"
 
 
 class FullPipelineService:
@@ -260,6 +260,13 @@ class FullPipelineService:
             }
             self.progress("pipeline.search.batch", latest)
             if state.active_count == 0:
+                with session_scope() as session:
+                    added = PlanningService(client=client, config=self.config).supplement(
+                        session, plan_id, audit
+                    )
+                if added:
+                    self.progress("pipeline.search.supplement", {"regions": added})
+                    continue
                 if audit.candidate_count == 0:
                     raise ContractError("search completed without retained content URLs")
                 return latest

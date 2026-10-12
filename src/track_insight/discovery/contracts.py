@@ -37,6 +37,7 @@ class CoverageAudit(BaseModel):
     dominant_domains: list[dict[str, int | str]]
     missing_source_classes: list[str]
     warnings: list[str]
+    region_coverage: dict[str, dict] = Field(default_factory=dict)
 
 
 class SearchRunSummary(BaseModel):

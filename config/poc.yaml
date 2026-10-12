@@ -6,16 +6,16 @@ scope:
   end_date: 2026-09-16
 bailian:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  model: qwen3.7-flash
+  model: deepseek-v4.1-flash
   search_max_output_tokens: 8192
   review_batch_size: 10
   timeout_seconds: 300
   max_retries: 2
   max_concurrency: 4
 budgets:
-  max_work_packages: 8
-  max_searches_per_work_package: 8
-  max_candidates_per_work_package: 100
+  max_work_packages: 16
+  max_searches_per_work_package: 20
+  max_candidates_per_work_package: 300
 coverage:
   required_source_classes:
     - government
@@ -35,8 +35,8 @@ stage2:
   max_response_bytes: 15728640
   min_usable_text_chars: 500
   max_model_input_chars: 80000
-  analysis_model: qwen3.7-flash
-  web_extractor_model: qwen3.7-flash
+  analysis_model: deepseek-v4.1-flash
+  web_extractor_model: deepseek-v4.1-flash
   web_extractor_reasoning_effort: low
   ocr_model: qwen3.5-ocr
   analysis_max_output_tokens: 16384
@@ -44,20 +44,27 @@ stage2:
   prompts:
     event_extraction: config/prompts/event_extraction_v2.md
 stage3:
-  model: qwen3.7-flash
+  model: deepseek-v4.1-flash
   event_batch_size: 20
-  max_events_per_run: 1000
+  max_events_per_run: 10000
   minimum_event_confidence: 0.70
   generation_max_output_tokens: 8192
   prompts:
     topic_generation: config/prompts/topic_generation_v1.md
 stage4:
-  model: qwen3.7-flash
+  smb_product_catalog: docs/reference/联想SMB产品服务列表.md
+  market_merge_strategy: bounded_direct
+  model: deepseek-v4.1-flash
   minimum_supporting_events: 1
   forbid_region_in_identity: true
+  target_track_boundary: >
+    仅形成制造业企业本身的赛道。赛道应由制造企业持续研发、生产或制造的产品、材料、
+    零部件、设备或工业软件识别。一般法律、金融、保险、培训、公共服务、园区运营、
+    设施运营、招商平台、消费服务和仅使用制造业产品的应用方不形成赛道。
   generation_max_output_tokens: 16384
   analysis_max_output_tokens: 8192
   prompts:
     track_generation: config/prompts/track_generation_v1.md
-    track_merge: config/prompts/track_merge_v1.md
     track_analysis: config/prompts/track_analysis_v1.md
+    track_definition: config/prompts/track_definition_v1.md
+    track_market_catalog: config/prompts/track_market_coarse_c.md

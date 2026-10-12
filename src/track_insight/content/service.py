@@ -90,8 +90,7 @@ class PageService:
                     PageCapture.url_candidate_id == UrlCandidate.id,
                 )
                 .where(
-                    (PageCapture.id.is_(None))
-                    | (PageCapture.status == TaskStatus.FAILED_TERMINAL)
+                    (PageCapture.id.is_(None)) | (PageCapture.status == TaskStatus.FAILED_TERMINAL)
                 )
                 .order_by(UrlCandidate.created_at, UrlCandidate.id)
                 .limit(limit)
@@ -128,7 +127,9 @@ class PageService:
             "recovered_count": recovered,
         }
 
-    def fetch_work(self, *, limit: int = 20) -> dict[str, int | str]:
+    def fetch_work(
+        self, *, limit: int = 20, capture_ids: list[uuid.UUID] | None = None
+    ) -> dict[str, int | str]:
         if limit < 1:
             raise ValueError("limit must be positive")
         pipeline_run_id = uuid.uuid4()
@@ -167,6 +168,9 @@ class PageService:
                         worker_id=f"page-fetch-{pipeline_run_id}",
                         lease_seconds=get_settings().job_lease_seconds,
                         job_type="page_acquire",
+                        object_ids=[str(value) for value in capture_ids]
+                        if capture_ids is not None
+                        else None,
                     )
                     if job is None:
                         break

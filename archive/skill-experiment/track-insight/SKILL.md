@@ -26,7 +26,7 @@ Resolve relative dates to absolute dates in `manifest.json`. Treat the expected 
 
 ## Runtime
 
-Resolve `<skill-dir>` as the directory containing this `SKILL.md`; never assume a repository layout, current working directory, user name, drive letter, or installation path. Run scripts with ordinary Python 3.10 or later. The scripts do not require `uv`, Docker, or a project virtual environment.
+Resolve `<skill-dir>` as the directory containing this `SKILL.md`; never assume a repository layout, current working directory, user name, drive letter, or installation path. Run scripts with ordinary Python 3.10 or later. The scripts do not require Docker or a project virtual environment.
 
 If the packages declared in `<skill-dir>/requirements.txt` are not already available, install them into the user's chosen Python environment before running acquisition scripts:
 

@@ -37,9 +37,14 @@ from track_insight.infrastructure.models import (
     UrlDiscovery,
 )
 from track_insight.settings import PocConfig
-from track_insight.topics.contracts import TopicGenerationOutput, TopicStatus
+from track_insight.topics.contracts import (
+    CompactTopicGenerationOutput,
+    TopicGenerationOutput,
+    TopicStatus,
+    expand_topic_output,
+)
 
-TOPIC_PROCESSOR_VERSION = "event-topic-v10-work-package-direct"
+TOPIC_PROCESSOR_VERSION = "event-topic-v11-short-refs"
 NO_RECONCILIATION_VERSION = "not-used"
 
 
@@ -61,7 +66,7 @@ class TopicService:
     ) -> dict[str, Any]:
         reconcile_stale_pipeline_runs(session)
         event_limit = min(
-            max_events or self.config.stage3.max_events_per_run,
+            max_events if max_events is not None else self.config.stage3.max_events_per_run,
             self.config.stage3.max_events_per_run,
         )
         effective_batch_size = min(
@@ -73,9 +78,16 @@ class TopicService:
         )
         if not events:
             raise ContractError("no eligible events found for the research plan")
-        packages = [
-            item for item in _events_by_work_package(session, plan_id, events) if item[1]
-        ]
+        if max_events is None and len(events) == event_limit:
+            eligible_count = _count_eligible_events(
+                session, plan_id, self.config.stage3.minimum_event_confidence
+            )
+            if eligible_count > event_limit:
+                raise ContractError(
+                    f"{eligible_count} eligible Events exceed the configured limit of "
+                    f"{event_limit}; increase stage3.max_events_per_run before a full build"
+                )
+        packages = [item for item in _events_by_work_package(session, plan_id, events) if item[1]]
         if not packages:
             raise ContractError("eligible Events are not linked to any WorkPackage")
 
@@ -101,19 +113,13 @@ class TopicService:
                 TopicBuildRun.processor_version == TOPIC_PROCESSOR_VERSION,
             )
         )
-        if (
-            build_run is not None
-            and build_run.status == TaskStatus.COMPLETED
-            and build_run.error_code != "partial_batch_failure"
-            and not resume
-        ):
+        if build_run is not None and build_run.status == TaskStatus.COMPLETED:
             return _run_payload(build_run, resumed=True)
         if build_run is not None and build_run.status == TaskStatus.RUNNING and not resume:
             raise ContractError("an unfinished Topic build exists; rerun with --resume")
 
         batch_count = sum(
-            math.ceil(len(package_events) / effective_batch_size)
-            for _, package_events in packages
+            math.ceil(len(package_events) / effective_batch_size) for _, package_events in packages
         )
         pipeline = PipelineRun(
             run_type="event_to_topic",
@@ -187,12 +193,10 @@ class TopicService:
 
         candidates = list(
             session.scalars(
-                select(TopicCandidate).where(
-                    TopicCandidate.topic_build_run_id == build_run.id
-                )
+                select(TopicCandidate).where(TopicCandidate.topic_build_run_id == build_run.id)
             )
         )
-        snapshot_activated = bool(candidates)
+        snapshot_activated = not failed_batches and bool(candidates)
         if snapshot_activated:
             _activate_topic_snapshot(session, build_run)
 
@@ -218,7 +222,7 @@ class TopicService:
         build_run.candidate_count = len(candidates)
         build_run.topic_count = active_topics
         build_run.unassigned_event_count = len({event.id for event in events} - assigned)
-        build_run.status = TaskStatus.COMPLETED
+        build_run.status = TaskStatus.FAILED_RETRYABLE if failed_batches else TaskStatus.COMPLETED
         build_run.finished_at = datetime.now(UTC)
         if failed_batches:
             build_run.error_code = "partial_batch_failure"
@@ -228,7 +232,7 @@ class TopicService:
         else:
             build_run.error_code = None
             build_run.error_message = None
-        pipeline.status = TaskStatus.COMPLETED
+        pipeline.status = build_run.status
         pipeline.counters = {
             "events": len(events),
             "work_packages": len(packages),
@@ -242,7 +246,11 @@ class TopicService:
         record_event(
             session,
             event_type="topic.run.completed",
-            message="WorkPackage-scoped Event-to-Topic run completed",
+            message=(
+                "WorkPackage-scoped Event-to-Topic run has failed batches"
+                if failed_batches
+                else "WorkPackage-scoped Event-to-Topic run completed"
+            ),
             level="WARNING" if failed_batches else "INFO",
             pipeline_run_id=pipeline.id,
             entity_type="topic_build_run",
@@ -314,6 +322,7 @@ class TopicService:
         )
         session.commit()
         try:
+            event_refs = {f"E{i}": event.id for i, event in enumerate(events, 1)}
             result = self.client.complete_structured(
                 messages=[
                     {"role": "system", "content": prompt},
@@ -322,17 +331,21 @@ class TopicService:
                         "content": json.dumps(
                             {
                                 "work_package": _work_package_payload(work_package),
-                                "events": [_event_payload(event) for event in events],
+                                "events": [
+                                    _event_payload(event, event_ref=f"E{i}")
+                                    for i, event in enumerate(events, 1)
+                                ],
                             },
                             ensure_ascii=False,
                         ),
                     },
                 ],
-                output_model=TopicGenerationOutput,
+                output_model=CompactTopicGenerationOutput,
                 model=self.config.stage3.model,
                 max_tokens=self.config.stage3.generation_max_output_tokens,
                 enable_thinking=False,
             )
+            result.output = expand_topic_output(result.output, event_refs)
             ignored_memberships = _sanitize_generation(
                 result.output, {event.id for event in events}
             )
@@ -551,6 +564,31 @@ def _select_events(
     )
 
 
+def _count_eligible_events(session: Session, plan_id: uuid.UUID, minimum_confidence: float) -> int:
+    return int(
+        session.scalar(
+            select(func.count(Event.id))
+            .join(PageAnalysis, PageAnalysis.id == Event.page_analysis_id)
+            .join(PageCapture, PageCapture.id == PageAnalysis.page_capture_id)
+            .where(
+                PageAnalysis.status == TaskStatus.COMPLETED,
+                Event.confidence >= minimum_confidence,
+                select(UrlDiscovery.id)
+                .join(
+                    ResearchWorkPackage,
+                    ResearchWorkPackage.id == UrlDiscovery.research_work_package_id,
+                )
+                .where(
+                    UrlDiscovery.url_candidate_id == PageCapture.url_candidate_id,
+                    ResearchWorkPackage.research_plan_id == plan_id,
+                )
+                .exists(),
+            )
+        )
+        or 0
+    )
+
+
 def _events_by_work_package(
     session: Session, plan_id: uuid.UUID, events: list[Event]
 ) -> list[tuple[ResearchWorkPackage, list[Event]]]:
@@ -618,9 +656,9 @@ def _work_package_payload(work_package: ResearchWorkPackage) -> dict[str, Any]:
     }
 
 
-def _event_payload(event: Event) -> dict[str, Any]:
+def _event_payload(event: Event, *, event_ref: str | None = None) -> dict[str, Any]:
     return {
-        "event_id": str(event.id),
+        ("event_ref" if event_ref else "event_id"): event_ref or str(event.id),
         "event_type": event.event_type,
         "event_status": event.event_status,
         "title": event.title,
@@ -669,9 +707,7 @@ def _complete_model_run(model_run: ModelRun, result) -> None:
     model_run.finished_at = datetime.now(UTC)
 
 
-def _fail_model_and_job(
-    session: Session, model_run: ModelRun, job: Job, error: Exception
-) -> None:
+def _fail_model_and_job(session: Session, model_run: ModelRun, job: Job, error: Exception) -> None:
     retryable = isinstance(error, ModelCallError) and error.retryable
     model_run.status = TaskStatus.FAILED_RETRYABLE if retryable else TaskStatus.FAILED_TERMINAL
     model_run.error_code = (
@@ -762,8 +798,7 @@ def topic_status(session: Session, plan_id: uuid.UUID) -> TopicStatus:
             or 0
         )
         failed_jobs = sum(
-            job.status in (TaskStatus.FAILED_RETRYABLE, TaskStatus.FAILED_TERMINAL)
-            for job in jobs
+            job.status in (TaskStatus.FAILED_RETRYABLE, TaskStatus.FAILED_TERMINAL) for job in jobs
         )
     return TopicStatus(
         plan_id=str(plan_id),

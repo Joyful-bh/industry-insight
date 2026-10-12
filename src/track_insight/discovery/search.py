@@ -1,16 +1,20 @@
 import json
+import re
 import time
-from datetime import UTC, datetime
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, date, datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from track_insight.core.enums import SearchDecision, TaskStatus
+from track_insight.core.enums import SearchDecision, TaskStatus, UrlType
 from track_insight.core.errors import ContractError, ModelCallError
 from track_insight.core.fingerprints import fingerprint
 from track_insight.discovery.contracts import SearchReviewOutput, SearchRunSummary
 from track_insight.discovery.coverage import build_coverage_audit
+from track_insight.discovery.opensearch import search_and_review as opensearch_search_and_review
 from track_insight.discovery.url_registry import register_candidate
 from track_insight.infrastructure.bailian.client import BailianClient
 from track_insight.infrastructure.bailian.contracts import WebSearchSource
@@ -33,7 +37,7 @@ from track_insight.infrastructure.models import (
 )
 from track_insight.settings import PocConfig, get_settings
 
-SEARCH_PROCESSOR_VERSION = "search-review-v5-batched-all-sources"
+SEARCH_PROCESSOR_VERSION = "search-v7-cited-sources"
 RECOVERABLE_TERMINAL_ERRORS = {
     "invalid_model_output",
     "invalid_model_output_after_recovery",
@@ -101,94 +105,48 @@ class SearchService:
             )
         )
         processed = skipped = failed = 0
-        eligible_statuses = (
-            (TaskStatus.PENDING, TaskStatus.FAILED_RETRYABLE) if resume else (TaskStatus.PENDING,)
-        )
-        for package in packages:
-            tasks = list(
-                session.scalars(
-                    select(SearchTask)
-                    .where(SearchTask.research_work_package_id == package.id)
-                    .order_by(SearchTask.id)
-                    .limit(search_limit)
-                )
-            )
-            for task in tasks:
-                if (
-                    resume
-                    and task.status == TaskStatus.FAILED_TERMINAL
-                    and task.error_code in RECOVERABLE_TERMINAL_ERRORS
-                ):
-                    self._requeue_validation_failure(session, task, pipeline_run.id)
-                if task.status == TaskStatus.COMPLETED or task.status not in eligible_statuses:
-                    record_event(
-                        session,
-                        event_type="search.task.skipped",
-                        message="Search task skipped because its status is not eligible",
-                        pipeline_run_id=pipeline_run.id,
-                        entity_type="search_task",
-                        entity_id=task.id,
-                        details={"status": str(task.status), "query": task.query},
+        package_ids = [package.id for package in packages]
+        plan_key, run_key = plan.id, pipeline_run.id
+        session.commit()
+        workers = min(self.config.bailian.max_concurrency, len(package_ids))
+        if workers > 1:
+            bind = session.get_bind()
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [
+                    executor.submit(
+                        self._run_package_isolated,
+                        bind,
+                        plan_key,
+                        package_id,
+                        run_key,
+                        search_limit,
+                        resume,
                     )
-                    skipped += 1
-                    continue
-                job = claim_job_for_object(
-                    session,
-                    worker_id=f"search-run-{pipeline_run.id}",
-                    lease_seconds=get_settings().job_lease_seconds,
-                    job_type="search",
-                    object_type="search_task",
-                    object_id=str(task.id),
-                )
-                if job is None:
-                    skipped += 1
-                    record_event(
-                        session,
-                        event_type="search.task.skipped",
-                        message="Search task skipped because its job is currently not claimable",
-                        level="WARNING",
-                        pipeline_run_id=pipeline_run.id,
-                        entity_type="search_task",
-                        entity_id=task.id,
-                        details={"status": str(task.status), "query": task.query},
-                    )
-                    session.commit()
-                    continue
-                remaining_candidates = package.max_candidates - self._candidate_count(
-                    session, package.id
-                )
-                if remaining_candidates <= 0:
-                    task.status = TaskStatus.COMPLETED
-                    task.completion_reason = "candidate_budget_reached"
-                    task.finished_at = datetime.now(UTC)
-                    complete_job(session, job, {"completion_reason": "candidate_budget_reached"})
-                    skipped += 1
-                    session.commit()
-                    continue
+                    for package_id in package_ids
+                ]
                 try:
-                    self._run_task(
-                        session,
-                        plan,
-                        package,
-                        task,
-                        job=job,
-                        pipeline_run_id=pipeline_run.id,
-                        remaining_candidates=remaining_candidates,
-                    )
-                    processed += 1
-                except ModelCallError:
-                    failed += 1
-                    session.commit()
-                    continue
-                session.commit()
-            self._update_package_status(session, package)
-            session.commit()
+                    for future in futures:
+                        done, ignored, errors = future.result()
+                        processed += done
+                        skipped += ignored
+                        failed += errors
+                except BaseException:
+                    for future in futures:
+                        future.cancel()
+                    raise
+            session.expire_all()
+        else:
+            for package in packages:
+                done, ignored, errors = self._run_package(
+                    session, plan, package, pipeline_run.id, search_limit, resume
+                )
+                processed += done
+                skipped += ignored
+                failed += errors
         audit = build_coverage_audit(session, plan.id, self.config)
         partial_success = processed > 0 and failed > 0
         pipeline_run.status = (
-            TaskStatus.COMPLETED
-            if processed > 0 or failed == 0
-            else TaskStatus.FAILED_RETRYABLE
+            TaskStatus.COMPLETED if processed > 0 or failed == 0 else TaskStatus.FAILED_RETRYABLE
         )
         pipeline_run.finished_at = datetime.now(UTC)
         pipeline_run.counters = {
@@ -220,6 +178,117 @@ class SearchService:
             audit=audit,
         )
 
+    def _run_package_isolated(
+        self, bind, plan_id, package_id, pipeline_run_id, search_limit, resume
+    ) -> tuple[int, int, int]:
+        with Session(bind=bind) as worker_session:
+            return self._run_package(
+                worker_session,
+                worker_session.get(ResearchPlan, plan_id),
+                worker_session.get(ResearchWorkPackage, package_id),
+                pipeline_run_id,
+                search_limit,
+                resume,
+            )
+
+    def _run_package(
+        self, session, plan, package, pipeline_run_id, search_limit, resume
+    ) -> tuple[int, int, int]:
+        processed = skipped = failed = 0
+        eligible_statuses = (
+            (TaskStatus.PENDING, TaskStatus.FAILED_RETRYABLE) if resume else (TaskStatus.PENDING,)
+        )
+        tasks = list(
+            session.scalars(
+                select(SearchTask)
+                .where(SearchTask.research_work_package_id == package.id)
+                .order_by(SearchTask.id)
+                .limit(search_limit)
+            )
+        )
+        for task in tasks:
+            if resume and task.status == TaskStatus.RUNNING:
+                recovered_job = session.scalar(
+                    select(Job).where(
+                        Job.job_type == "search",
+                        Job.object_type == "search_task",
+                        Job.object_id == str(task.id),
+                        Job.status == TaskStatus.FAILED_RETRYABLE,
+                    )
+                )
+                if recovered_job is not None:
+                    task.status = TaskStatus.FAILED_RETRYABLE
+            if (
+                resume
+                and task.status == TaskStatus.FAILED_TERMINAL
+                and task.error_code in RECOVERABLE_TERMINAL_ERRORS
+            ):
+                self._requeue_validation_failure(session, task, pipeline_run_id)
+            if task.status == TaskStatus.COMPLETED or task.status not in eligible_statuses:
+                record_event(
+                    session,
+                    event_type="search.task.skipped",
+                    message="Search task skipped because its status is not eligible",
+                    pipeline_run_id=pipeline_run_id,
+                    entity_type="search_task",
+                    entity_id=task.id,
+                    details={"status": str(task.status), "query": task.query},
+                )
+                skipped += 1
+                continue
+            job = claim_job_for_object(
+                session,
+                worker_id=f"search-run-{pipeline_run_id}",
+                lease_seconds=get_settings().job_lease_seconds,
+                job_type="search",
+                object_type="search_task",
+                object_id=str(task.id),
+            )
+            if job is None:
+                skipped += 1
+                record_event(
+                    session,
+                    event_type="search.task.skipped",
+                    message="Search task skipped because its job is currently not claimable",
+                    level="WARNING",
+                    pipeline_run_id=pipeline_run_id,
+                    entity_type="search_task",
+                    entity_id=task.id,
+                    details={"status": str(task.status), "query": task.query},
+                )
+                session.commit()
+                continue
+            remaining_candidates = package.max_candidates - self._candidate_count(
+                session, package.id
+            )
+            if remaining_candidates <= 0:
+                task.status = TaskStatus.COMPLETED
+                task.completion_reason = "candidate_budget_reached"
+                task.finished_at = datetime.now(UTC)
+                complete_job(session, job, {"completion_reason": "candidate_budget_reached"})
+                skipped += 1
+                session.commit()
+                continue
+            try:
+                self._run_task(
+                    session,
+                    plan,
+                    package,
+                    task,
+                    job=job,
+                    pipeline_run_id=pipeline_run_id,
+                    remaining_candidates=remaining_candidates,
+                )
+                processed += 1
+            except ModelCallError:
+                failed += 1
+                session.commit()
+                continue
+            session.commit()
+        self._update_package_status(session, package)
+        session.commit()
+        return processed, skipped, failed
+
     def _run_task(
         self,
         session: Session,
@@ -231,9 +300,16 @@ class SearchService:
         pipeline_run_id: object,
         remaining_candidates: int,
     ) -> None:
-        prompt_path = self.config.prompts.search_review
-        prompt = prompt_path.read_text(encoding="utf-8")
-        prompt_version = _prompt_version(prompt_path, prompt)
+        cited_only = (
+            self.config.search.provider == "bailian" and self.config.search.selection == "citations"
+        )
+        if cited_only:
+            prompt = "收集百炼搜索综述引用的URL，作为待核验的原始材料候选。"
+            prompt_version = "search-citations-v1"
+        else:
+            prompt_path = self.config.prompts.search_review
+            prompt = prompt_path.read_text(encoding="utf-8")
+            prompt_version = _prompt_version(prompt_path, prompt)
         task_payload = {
             "query": task.query,
             "purpose": task.purpose,
@@ -244,19 +320,30 @@ class SearchService:
             "start_date": plan.start_date.isoformat(),
             "end_date": plan.end_date.isoformat(),
         }
+        dates = re.match(r"(\d{4}-\d{2}-\d{2})至(\d{4}-\d{2}-\d{2})", task.query)
+        if dates:
+            start, end = dates.groups()
+            if task_payload["start_date"] <= start <= end <= task_payload["end_date"]:
+                task_payload["start_date"], task_payload["end_date"] = start, end
         model_run = ModelRun(
             pipeline_run_id=pipeline_run_id,
-            task_type="search_review",
+            task_type="search_citations" if cited_only else "search_review",
             status=TaskStatus.RUNNING,
             provider="bailian",
             model=self.config.bailian.model,
             prompt_version=prompt_version,
-            input_fingerprint=fingerprint(task_payload, prompt_version, self.config.bailian.model),
+            input_fingerprint=fingerprint(
+                task_payload,
+                prompt_version,
+                self.config.bailian.model,
+                self.config.search.model_dump(mode="json"),
+            ),
             tool_config={
                 "type": "web_search",
                 "review_batch_size": self.config.bailian.review_batch_size,
                 "search_max_output_tokens": self.config.bailian.search_max_output_tokens,
-                "api": "responses",
+                "api": self.config.search.provider,
+                "search_config": self.config.search.model_dump(mode="json"),
             },
             started_at=datetime.now(UTC),
         )
@@ -284,6 +371,7 @@ class SearchService:
                 "model": self.config.bailian.model,
             },
         )
+        session.commit()
         try:
             persisted_results: dict[str, SearchResult] = {}
 
@@ -308,7 +396,7 @@ class SearchService:
                             decision="pending_review",
                             url_type="unknown",
                             source_class="unknown",
-                            reason="等待结构化复核",
+                            reason="等待候选选择",
                             raw_payload=source.model_dump(mode="json"),
                         )
                         session.add(search_result)
@@ -321,14 +409,14 @@ class SearchService:
                         search_result.decision = "pending_review"
                         search_result.url_type = "unknown"
                         search_result.source_class = "unknown"
-                        search_result.reason = "等待结构化复核"
+                        search_result.reason = "等待候选选择"
                         search_result.raw_payload = source.model_dump(mode="json")
                     session.flush()
                     persisted_results[source.refer] = search_result
                 record_event(
                     session,
                     event_type="search.sources.persisted",
-                    message="All discovered search sources persisted before review",
+                    message="All discovered search sources persisted before selection",
                     pipeline_run_id=pipeline_run_id,
                     job_id=job.id,
                     model_run_id=model_run.id,
@@ -338,20 +426,35 @@ class SearchService:
                 )
                 session.commit()
 
-            result = self.client.search_and_review(
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {
-                        "role": "user",
-                        "content": json.dumps(task_payload, ensure_ascii=False),
-                    },
-                ],
-                output_model=SearchReviewOutput,
-                model=self.config.bailian.model,
-                review_batch_size=self.config.bailian.review_batch_size,
-                search_max_output_tokens=self.config.bailian.search_max_output_tokens,
-                on_sources_discovered=persist_discovered_sources,
-            )
+            messages = [
+                {"role": "system", "content": prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(task_payload, ensure_ascii=False),
+                },
+            ]
+            if self.config.search.provider == "opensearch":
+                result = opensearch_search_and_review(
+                    client=self.client,
+                    config=self.config,
+                    messages=messages,
+                    output_model=SearchReviewOutput,
+                    on_sources_discovered=persist_discovered_sources,
+                )
+            else:
+                result = self.client.search_and_review(
+                    messages=messages,
+                    output_model=SearchReviewOutput,
+                    model=self.config.bailian.model,
+                    review_batch_size=self.config.bailian.review_batch_size,
+                    search_max_output_tokens=self.config.bailian.search_max_output_tokens,
+                    on_sources_discovered=persist_discovered_sources,
+                    cited_only=cited_only,
+                )
+            if not cited_only:
+                result.raw_response["review_constraints"] = apply_review_constraints(
+                    result.output, result.web_search, task_payload
+                )
             judgments = {item.refer: item for item in result.output.judgments}
             references = {item.refer for item in result.web_search}
             if not references:
@@ -411,6 +514,9 @@ class SearchService:
             session.flush()
             raise
 
+        # 不同工作包可能同时发现同一 URL；仅串行化短暂的候选落库事务。
+        if session.get_bind().dialect.name == "postgresql":
+            session.execute(text("SELECT pg_advisory_xact_lock(74120901)"))
         model_run.status = TaskStatus.COMPLETED
         model_run.request_id = result.request_id
         model_run.usage = result.usage
@@ -549,3 +655,42 @@ class SearchService:
 
 def _prompt_version(path: Path, content: str) -> str:
     return f"{path.stem}:{fingerprint(content)[:12]}"
+
+
+def apply_review_constraints(
+    output: SearchReviewOutput, sources: list[WebSearchSource], task: dict
+) -> list[dict]:
+    corrections = []
+    by_refer = {source.refer: source for source in sources}
+    for judgment in output.judgments:
+        source = by_refer.get(judgment.refer)
+        if source is None:
+            continue
+        reason = None
+        published = None
+        if source.publish_date:
+            try:
+                published = date.fromisoformat(source.publish_date[:10]).isoformat()
+            except ValueError:
+                pass
+        if published and not task["start_date"] <= published <= task["end_date"]:
+            reason = "搜索返回的发布日期超出本任务时间范围。"
+        url = urlsplit(source.link)
+        query_keys = {key.lower() for key in parse_qs(url.query)}
+        search_page = bool(re.search(r"/(?:search|searchlist)(?:/|$)", url.path.lower()))
+        search_page = search_page or bool(query_keys & {"q", "query", "searchword", "keyword"})
+        if judgment.url_type == UrlType.SOURCE_ENTRY or search_page:
+            reason = "栏目、列表或搜索入口不能作为具体信号材料。"
+            judgment.url_type = UrlType.SOURCE_ENTRY
+        if reason and judgment.decision != SearchDecision.DROP:
+            corrections.append(
+                {
+                    "refer": judgment.refer,
+                    "model_decision": judgment.decision.value,
+                    "final_decision": "drop",
+                    "reason": reason,
+                }
+            )
+            judgment.decision = SearchDecision.DROP
+            judgment.reason = reason
+    return corrections

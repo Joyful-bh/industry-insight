@@ -25,7 +25,7 @@ from track_insight.pipeline import (
     PipelineExecutionError,
     full_pipeline_status,
 )
-from track_insight.planning.contracts import ResearchScope
+from track_insight.planning.contracts import PlanningOutput, ResearchScope
 from track_insight.planning.service import PlanningService, validate_plan
 from track_insight.reporting.dashboard import build_track_dashboard
 from track_insight.settings import PocConfig, get_settings, load_poc_config
@@ -161,6 +161,42 @@ def research_plan_build(
             plan = PlanningService(client=client, config=config).build(session, scope)
             plan_id = str(plan.id)
         typer.echo(json.dumps({"plan_id": plan_id, "status": "completed"}, ensure_ascii=False))
+    except TrackInsightError as error:
+        raise typer.Exit(code=1) from _echo_error(error)
+
+
+@app.command("research-plan-import")
+def research_plan_import(
+    plan_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    metadata_path: Annotated[Path | None, typer.Option("--metadata-path")] = None,
+    config_path: Path = Path("config/poc.yaml"),
+) -> None:
+    """Import a saved plan and enqueue searches without calling any model."""
+    config = load_poc_config(config_path)
+    metadata_path = metadata_path or plan_path.with_name("metrics.json")
+    try:
+        output = PlanningOutput.model_validate_json(plan_path.read_text(encoding="utf-8"))
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        scope = ResearchScope.model_validate(metadata["scope"])
+    except (OSError, ValueError, KeyError) as error:
+        raise typer.BadParameter(f"invalid plan or scope metadata: {error}") from error
+    try:
+        with session_scope() as session:
+            plan = PlanningService(config=config).import_plan(
+                session,
+                scope,
+                output,
+                source_path=plan_path,
+                metadata_path=metadata_path,
+            )
+            result = {
+                "plan_id": str(plan.id),
+                "status": "completed",
+                "api_calls": 0,
+                "work_packages": len(output.work_packages),
+                "search_tasks": sum(len(p.search_tasks) for p in output.work_packages),
+            }
+        typer.echo(json.dumps(result, ensure_ascii=False))
     except TrackInsightError as error:
         raise typer.Exit(code=1) from _echo_error(error)
 
@@ -436,9 +472,7 @@ def track_show(track_id: str) -> None:
 @app.command("dashboard-build")
 def dashboard_build(
     plan_id: str,
-    output: Annotated[Path, typer.Option("--output", "-o")] = Path(
-        "reports/track_dashboard.html"
-    ),
+    output: Annotated[Path, typer.Option("--output", "-o")] = Path("reports/track_dashboard.html"),
 ) -> None:
     try:
         with session_scope() as session:

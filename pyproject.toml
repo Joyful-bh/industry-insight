@@ -9,6 +9,7 @@ dependencies = [
     "beautifulsoup4>=4.13,<5",
     "fonttools>=4.0,<5",
     "httpx>=0.28,<1",
+    "numpy>=2,<3",
     "psycopg[binary]>=3.2,<4",
     "pypdf>=6.0,<7",
     "pydantic-settings>=2.7,<3",
@@ -46,7 +47,7 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-exclude = [".runtime-tests", ".test-tmp", ".uv-cache", ".venv", "data"]
+exclude = [".runtime-tests", ".test-tmp", ".venv", "data", "experiments"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

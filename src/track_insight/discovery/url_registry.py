@@ -68,7 +68,7 @@ def register_candidate(
         session.add(candidate)
         session.flush()
     elif (
-        candidate.decision == SearchDecision.MAYBE and search_result.decision == SearchDecision.KEEP
+        candidate.decision != SearchDecision.KEEP and search_result.decision == SearchDecision.KEEP
     ):
         candidate.decision = SearchDecision.KEEP
     existing = session.scalar(

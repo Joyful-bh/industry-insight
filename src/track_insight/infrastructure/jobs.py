@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -71,6 +71,8 @@ def claim_job(
     lease_seconds: int,
     job_type: str,
     processor_version: str | None = None,
+    object_ids: list[str] | None = None,
+    job_ids: list[uuid.UUID] | None = None,
 ) -> Job | None:
     now = datetime.now(UTC)
     conditions = [
@@ -81,6 +83,14 @@ def claim_job(
     ]
     if processor_version is not None:
         conditions.append(Job.processor_version == processor_version)
+    if object_ids is not None:
+        if not object_ids:
+            return None
+        conditions.append(Job.object_id.in_(object_ids))
+    if job_ids is not None:
+        if not job_ids:
+            return None
+        conditions.append(Job.id.in_(job_ids))
     job = session.scalar(
         select(Job)
         .where(*conditions)
@@ -166,20 +176,43 @@ def requeue_expired_jobs(session: Session, now: datetime | None = None) -> int:
     effective_now = now or datetime.now(UTC)
     result = session.execute(
         update(Job)
+        .execution_options(synchronize_session="fetch")
         .where(
             Job.status == TaskStatus.RUNNING,
             or_(Job.lease_until.is_(None), Job.lease_until < effective_now),
+            Job.attempts < Job.max_attempts,
         )
         .values(
             status=TaskStatus.FAILED_RETRYABLE,
             scheduled_at=effective_now,
             lease_owner=None,
             lease_until=None,
+            finished_at=None,
             error_code="lease_expired",
             error_message="Worker lease expired before completion",
         )
     )
-    return int(result.rowcount or 0)
+    exhausted = session.execute(
+        update(Job)
+        .execution_options(synchronize_session="fetch")
+        .where(
+            Job.attempts >= Job.max_attempts,
+            or_(
+                Job.status.in_((TaskStatus.PENDING, TaskStatus.FAILED_RETRYABLE)),
+                and_(
+                    Job.status == TaskStatus.RUNNING,
+                    or_(Job.lease_until.is_(None), Job.lease_until < effective_now),
+                ),
+            ),
+        )
+        .values(
+            status=TaskStatus.FAILED_TERMINAL,
+            finished_at=effective_now,
+            lease_owner=None,
+            lease_until=None,
+        )
+    )
+    return int(result.rowcount or 0) + int(exhausted.rowcount or 0)
 
 
 def reconcile_stale_pipeline_runs(

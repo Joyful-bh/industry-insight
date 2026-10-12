@@ -20,11 +20,10 @@ Topic 是对近期反复出现的技术、产品、制造服务或产业化活�
 
 每个 Topic 只输出：
 
-- candidate_key：本次响应内唯一的简短英文或拼音键；
 - label：简洁、稳定的技术、产品、制造服务或产业链环节名称；
 - definition：说明稳定边界和对应的企业经营活动；
 - summary：概括本批 Event 提供的近期信号；
-- event_ids：直接支持该 Topic 的输入 Event ID；
+- event_refs：直接支持该 Topic 的输入事件短编号，例如 E1、E2；
 - confidence：0 到 1。
 
-只能引用输入中的 event_id。严格输出 JSON，不输出 Markdown 或额外说明。
+只能引用输入中的 event_ref，不输出 UUID、candidate_key 或来源元信息；程序会回填完整标识与来源关联。严格输出 JSON，不输出 Markdown 或额外说明。

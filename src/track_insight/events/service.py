@@ -77,14 +77,18 @@ class EventService:
         self.client = client
         self.config = config
 
-    def extract_work(self, *, limit: int = 5) -> dict[str, int | str]:
+    def extract_work(
+        self, *, limit: int = 5, capture_ids: list[uuid.UUID] | None = None
+    ) -> dict[str, int | str]:
         if limit < 1:
             raise ValueError("limit must be positive")
         pipeline_run_id = uuid.uuid4()
         counts = {"completed": 0, "failed": 0, "skipped": 0, "event_count": 0}
         with session_scope() as session:
             reconcile_stale_pipeline_runs(session)
-            _enqueue_current_analysis_jobs(session, self.config)
+            current_job_ids = _enqueue_current_analysis_jobs(
+                session, self.config, capture_ids=capture_ids
+            )
             run = PipelineRun(
                 id=pipeline_run_id,
                 run_type="page_event_extraction",
@@ -112,6 +116,10 @@ class EventService:
                     lease_seconds=get_settings().job_lease_seconds,
                     job_type="page_analyze",
                     processor_version=ANALYSIS_PROCESSOR_VERSION,
+                    object_ids=[str(value) for value in capture_ids]
+                    if capture_ids is not None
+                    else None,
+                    job_ids=current_job_ids if capture_ids is not None else None,
                 )
                 if job is None:
                     break
@@ -154,9 +162,7 @@ class EventService:
                     analysis.error_code = None
                     analysis.error_message = None
                 started = time.monotonic()
-                prompt = self.config.stage2.prompts.event_extraction.read_text(
-                    encoding="utf-8"
-                )
+                prompt = self.config.stage2.prompts.event_extraction.read_text(encoding="utf-8")
                 prompt_version = _prompt_version(
                     self.config.stage2.prompts.event_extraction, prompt
                 )
@@ -750,17 +756,20 @@ def _match_evidence_fragments(text: str, quote: str) -> list[str]:
     return matches
 
 
-def _enqueue_current_analysis_jobs(session: Session, config: PocConfig) -> None:
-    captures = list(
-        session.scalars(
-            select(PageCapture).where(
-                PageCapture.status == TaskStatus.COMPLETED,
-                PageCapture.quality_status == QualityStatus.USABLE,
-            )
-        )
+def _enqueue_current_analysis_jobs(
+    session: Session, config: PocConfig, *, capture_ids: list[uuid.UUID] | None = None
+) -> list[uuid.UUID]:
+    statement = select(PageCapture).where(
+        PageCapture.status == TaskStatus.COMPLETED,
+        PageCapture.quality_status == QualityStatus.USABLE,
     )
+    if capture_ids is not None:
+        statement = statement.where(PageCapture.id.in_(capture_ids))
+    captures = list(session.scalars(statement))
+    job_ids = []
     for capture in captures:
         job = enqueue_page_analysis(session, capture, config)
+        job_ids.append(job.id)
         analysis = session.scalar(
             select(PageAnalysis).where(PageAnalysis.page_capture_id == capture.id)
         )
@@ -773,6 +782,7 @@ def _enqueue_current_analysis_jobs(session: Session, config: PocConfig) -> None:
             analysis.error_code = None
             analysis.error_message = None
     session.commit()
+    return job_ids
 
 
 def _count_values(values) -> dict[str, int]:

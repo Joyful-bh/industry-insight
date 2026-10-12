@@ -3,6 +3,7 @@ from datetime import date
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from track_insight.core.enums import SourceClass
+from track_insight.core.errors import ContractError
 
 
 class ResearchScope(BaseModel):
@@ -46,6 +47,56 @@ class WorkPackageProposal(BaseModel):
 
 class PlanningOutput(BaseModel):
     work_packages: list[WorkPackageProposal] = Field(min_length=1)
+
+
+class CompactSearchTaskProposal(BaseModel):
+    query: str = Field(min_length=2, max_length=70)
+    purpose: str = Field(min_length=5, max_length=500)
+    target_industries: list[str] = Field(min_length=1)
+    target_signal_types: list[str] = Field(min_length=1)
+    target_source_classes: list[SourceClass] = Field(min_length=1)
+
+
+class CompactWorkPackageProposal(BaseModel):
+    region_ref: str = Field(min_length=1)
+    search_tasks: list[CompactSearchTaskProposal] = Field(min_length=1)
+
+
+class CompactPlanningOutput(BaseModel):
+    work_packages: list[CompactWorkPackageProposal] = Field(min_length=1)
+
+
+def expand_planning_output(
+    output: CompactPlanningOutput, scope: ResearchScope, region_refs: dict[str, str]
+) -> PlanningOutput:
+    if len({p.region_ref for p in output.work_packages}) != len(output.work_packages):
+        raise ContractError("planning output repeated a region reference")
+    packages = []
+    for package in output.work_packages:
+        if package.region_ref not in region_refs:
+            raise ContractError("planning output references an unknown region")
+        region = region_refs[package.region_ref]
+        if region not in scope.regions:
+            raise ContractError("planning region reference is outside the assigned scope")
+        tasks = [
+            SearchTaskProposal(**task.model_dump(), target_regions=[region])
+            for task in package.search_tasks
+        ]
+        packages.append(
+            WorkPackageProposal(
+                objective=f"调查{region}的{'、'.join(scope.industry_scopes)}政策与产业信号",
+                regions=[region],
+                industry_scopes=scope.industry_scopes,
+                signal_types=list(
+                    dict.fromkeys(s for task in tasks for s in task.target_signal_types)
+                ),
+                source_classes=list(
+                    dict.fromkeys(s for task in tasks for s in task.target_source_classes)
+                ),
+                search_tasks=tasks,
+            )
+        )
+    return PlanningOutput(work_packages=packages)
 
 
 class PlanValidationResult(BaseModel):

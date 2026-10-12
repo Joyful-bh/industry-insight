@@ -1,8 +1,10 @@
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
 from typing import Any, TypeVar
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -28,7 +30,11 @@ class BailianClient:
         max_retries: int = 2,
     ) -> None:
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        transport = httpx.HTTPTransport(retries=max_retries)
+        if max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
+        self.max_retries = max_retries
+        # A single retry budget covers connection and response transport failures.
+        transport = httpx.HTTPTransport(retries=0)
         self.compatible_client = httpx.Client(
             base_url=base_url.rstrip("/") + "/",
             headers=headers,
@@ -38,6 +44,19 @@ class BailianClient:
 
     def close(self) -> None:
         self.compatible_client.close()
+
+    def embed_texts(self, texts: list[str], *, model: str = "text-embedding-v4") -> dict:
+        if not texts or len(texts) > 10:
+            raise ValueError("Embedding requests require 1 to 10 texts")
+        response = self._post_compatible(
+            "embeddings",
+            {"model": model, "input": texts, "dimensions": 512, "encoding_format": "float"},
+            operation="topic_grouping_embedding",
+        )
+        rows = sorted(response.get("data", []), key=lambda row: row["index"])
+        if [row["index"] for row in rows] != list(range(len(texts))):
+            raise ModelCallError("Embedding response does not cover all inputs")
+        return {"vectors": [row["embedding"] for row in rows], "usage": response.get("usage", {})}
 
     def complete_structured(
         self,
@@ -71,8 +90,11 @@ class BailianClient:
                     {
                         "role": "user",
                         "content": (
-                            "上次输出未通过结构校验。只修正格式，不增加解释。无论上次内容是否"
-                            "完整，都必须返回满足JSON Schema的完整JSON对象。\n上次输出：\n"
+                            "上次输出未通过校验。请依据下面的具体错误修正格式、字段值或引用关系，"
+                            "遵守原任务要求，不编造输入中不存在的信息，不增加解释。"
+                            "必须返回满足JSON Schema及任务约束的完整JSON对象。\n具体错误：\n"
+                            + str(first_error)[:6000]
+                            + "\n上次输出：\n"
                             + (_message_content(first_response) or "<empty>")
                         ),
                     },
@@ -109,6 +131,7 @@ class BailianClient:
         review_batch_size: int,
         search_max_output_tokens: int,
         on_sources_discovered: Callable[[list[WebSearchSource]], None] | None = None,
+        cited_only: bool = False,
     ) -> ModelRunResult[OutputT]:
         task_content = _last_user_content(messages)
         query = _extract_search_query(task_content)
@@ -117,6 +140,13 @@ class BailianClient:
             "instructions": (
                 "必须先调用 web_search 工具完成查询，禁止不调用工具而直接回答。"
                 "优先寻找原始政策、机构、园区、企业和权威产业来源；勿编造网址。"
+                + (
+                    "围绕本任务进行最多3次互补检索，不要逐个企业无限扩展搜索。"
+                    "输出简洁产业综述，每段事实必须附搜索工具返回的完整来源URL，逐字复制URL。"
+                    "末尾列出实际使用的来源完整URL；不能只写引用编号或省略来源。"
+                    if cited_only
+                    else ""
+                )
             ),
             "input": f"请使用联网搜索工具检索：{query}",
             "tools": [{"type": "web_search"}],
@@ -183,6 +213,108 @@ class BailianClient:
                 },
             )
         effective_search_response = retry_response or search_response
+        if cited_only:
+            return self.select_cited_sources(
+                response=effective_search_response,
+                output_model=output_model,
+                model=model,
+                initial_response=search_response,
+                retry_response=retry_response,
+                on_sources_discovered=on_sources_discovered,
+            )
+        return self.review_search_sources(
+            messages=messages,
+            output_model=output_model,
+            model=model,
+            review_batch_size=review_batch_size,
+            sources=sources,
+            search_response=search_response,
+            retry_response=retry_response,
+            answer_response=effective_search_response,
+            on_sources_discovered=on_sources_discovered,
+        )
+
+    def select_cited_sources(
+        self,
+        *,
+        response: dict[str, Any],
+        output_model: type[OutputT],
+        model: str,
+        initial_response: dict[str, Any] | None = None,
+        retry_response: dict[str, Any] | None = None,
+        on_sources_discovered: Callable[[list[WebSearchSource]], None] | None = None,
+    ) -> ModelRunResult[OutputT]:
+        """Select cited URLs locally; selection is not a relevance judgment."""
+        sources = _parse_search_sources(response)
+        selected = _cited_source_references(response, sources)
+        if not selected:
+            raise ModelCallError(
+                "Search summary contains no resolvable source citations",
+                code="missing_search_citations",
+                diagnostics={
+                    "search_response": initial_response or response,
+                    "search_retry_response": retry_response,
+                },
+            )
+        if on_sources_discovered is not None:
+            on_sources_discovered(sources)
+        judgments = [
+            {
+                "refer": source.refer,
+                "decision": "keep" if source.refer in selected else "drop",
+                "url_type": "content_page",
+                "source_class": (
+                    "government"
+                    if (urlsplit(source.link).hostname or "").endswith(".gov.cn")
+                    else "other"
+                ),
+                "reason": (
+                    "综述引用的候选来源，尚未核验网页相关性。"
+                    if source.refer in selected
+                    else "综述未引用，仅保留原始记录，不判定为无关。"
+                ),
+            }
+            for source in sources
+        ]
+        initial = initial_response or response
+        usage = dict(initial.get("usage") or {})
+        if retry_response is not None:
+            usage = _merge_usage(usage, retry_response.get("usage") or {})
+        return ModelRunResult[output_model](
+            request_id=response.get("id"),
+            model=model,
+            usage=usage,
+            raw_response={
+                "search_response": initial,
+                "search_retry_response": retry_response,
+                "selection": {
+                    "method": "citations",
+                    "selected_refers": sorted(selected),
+                    "raw_source_count": len(sources),
+                },
+                "review_responses": [],
+            },
+            output=output_model.model_validate({"judgments": judgments}),
+            web_search=sources,
+            call_count=1 + int(retry_response is not None),
+        )
+
+    def review_search_sources(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        output_model: type[OutputT],
+        model: str,
+        review_batch_size: int,
+        sources: list[WebSearchSource],
+        search_response: dict[str, Any],
+        retry_response: dict[str, Any] | None = None,
+        answer_response: dict[str, Any] | None = None,
+        initial_call_count: int = 1,
+        initial_recovery_used: bool = False,
+        on_sources_discovered: Callable[[list[WebSearchSource]], None] | None = None,
+    ) -> ModelRunResult[OutputT]:
+        task_content = _last_user_content(messages)
         if on_sources_discovered is not None:
             on_sources_discovered(sources)
         batches = [
@@ -194,8 +326,8 @@ class BailianClient:
         usage: dict[str, Any] = dict(search_response.get("usage") or {})
         if retry_response is not None:
             usage = _merge_usage(usage, retry_response.get("usage") or {})
-        call_count = 1 + int(retry_response is not None)
-        recovery_used = False
+        call_count = initial_call_count + int(retry_response is not None)
+        recovery_used = initial_recovery_used
         last_request_id: str | None = None
         for batch_index, batch in enumerate(batches, start=1):
             logger.info(
@@ -210,7 +342,7 @@ class BailianClient:
             review_messages = _review_messages(
                 messages=messages,
                 task_content=task_content,
-                search_response=effective_search_response,
+                search_response=answer_response or {},
                 sources=batch,
                 batch_index=batch_index,
                 batch_count=len(batches),
@@ -395,8 +527,8 @@ class BailianClient:
     ) -> dict[str, Any]:
         return self._post(self.compatible_client, endpoint, payload, operation=operation)
 
-    @staticmethod
     def _post(
+        self,
         client: httpx.Client,
         endpoint: str,
         payload: dict[str, Any],
@@ -413,16 +545,41 @@ class BailianClient:
                 "model": payload.get("model"),
             },
         )
-        try:
-            response = client.post(endpoint, json=payload)
-        except httpx.RequestError as error:
-            duration_ms = int((time.monotonic() - started) * 1000)
-            raise ModelCallError(
-                str(error),
-                retryable=True,
-                code="network_error",
-                diagnostics={"operation": operation, "duration_ms": duration_ms},
-            ) from error
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = client.post(endpoint, json=payload)
+                break
+            except httpx.RequestError as error:
+                transient = isinstance(
+                    error, (httpx.NetworkError, httpx.RemoteProtocolError, httpx.TimeoutException)
+                )
+                if transient and attempt < self.max_retries:
+                    delay = 2 ** attempt
+                    logger.warning(
+                        "Bailian transport interrupted; retrying request",
+                        extra={
+                            "event_type": "model.request.network_retry",
+                            "operation": operation,
+                            "attempt": attempt + 1,
+                            "max_attempts": self.max_retries + 1,
+                            "retry_delay_seconds": delay,
+                            "error_type": type(error).__name__,
+                        },
+                    )
+                    time.sleep(delay)
+                    continue
+                duration_ms = int((time.monotonic() - started) * 1000)
+                raise ModelCallError(
+                    str(error),
+                    retryable=transient,
+                    code="network_error",
+                    diagnostics={
+                        "operation": operation,
+                        "duration_ms": duration_ms,
+                        "attempts": attempt + 1,
+                        "error_type": type(error).__name__,
+                    },
+                ) from error
         duration_ms = int((time.monotonic() - started) * 1000)
         if response.status_code >= 400:
             detail = response.text[:2000]
@@ -542,6 +699,33 @@ def _parse_search_sources(payload: dict[str, Any]) -> list[WebSearchSource]:
     return sources
 
 
+def _cited_source_references(payload: dict[str, Any], sources: list[WebSearchSource]) -> set[str]:
+    text = _response_output_text(payload) or ""
+    cited_urls = set()
+    for item in payload.get("output") or []:
+        if item.get("type") != "message":
+            continue
+        for content in item.get("content") or []:
+            for annotation in content.get("annotations") or []:
+                citation = annotation.get("url_citation") or annotation
+                if citation.get("url"):
+                    cited_urls.add(citation["url"])
+    cited_urls.update(source.link for source in sources if source.link in text)
+    # Citation numbers refer to original tool ordering, before URL deduplication.
+    numbers = (
+        {int(n) for n in re.findall(r"\[(?:citation:)?(\d+)\]", text)} if not cited_urls else set()
+    )
+    ordered_urls = [
+        str(source["url"])
+        for item in payload.get("output") or []
+        if item.get("type") == "web_search_call"
+        for source in (item.get("action") or {}).get("sources") or []
+        if isinstance(source, dict) and source.get("url")
+    ]
+    cited_urls.update(url for index, url in enumerate(ordered_urls, 1) if index in numbers)
+    return {source.refer for source in sources if source.link in cited_urls or source.link in text}
+
+
 def _review_messages(
     *,
     messages: list[dict[str, Any]],
@@ -551,6 +735,7 @@ def _review_messages(
     batch_index: int,
     batch_count: int,
 ) -> list[dict[str, Any]]:
+    search_answer = _response_output_text(search_response)
     return [
         {
             "role": "system",
@@ -566,7 +751,7 @@ def _review_messages(
                 {
                     "task": task_content,
                     "batch": {"index": batch_index, "count": batch_count},
-                    "search_answer": _response_output_text(search_response),
+                    **({"search_answer": search_answer} if search_answer else {}),
                     "required_refers": [source.refer for source in sources],
                     "search_results": [source.model_dump(mode="json") for source in sources],
                     "required_output": {

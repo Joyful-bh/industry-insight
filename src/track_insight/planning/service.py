@@ -1,5 +1,6 @@
 import json
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from track_insight.core.enums import TaskStatus
 from track_insight.core.errors import ContractError, ModelCallError
 from track_insight.core.fingerprints import fingerprint
 from track_insight.infrastructure.bailian.client import BailianClient
+from track_insight.infrastructure.bailian.contracts import ModelRunResult
 from track_insight.infrastructure.events import record_event
 from track_insight.infrastructure.jobs import enqueue_job
 from track_insight.infrastructure.models import (
@@ -20,21 +22,34 @@ from track_insight.infrastructure.models import (
     SearchTask,
 )
 from track_insight.planning.contracts import (
+    CompactPlanningOutput,
     PlanningOutput,
     PlanValidationResult,
     ResearchScope,
+    expand_planning_output,
+)
+from track_insight.planning.coverage import (
+    expand_scope,
+    generate_covered_plan,
+    missing_regions,
+    query_is_regional,
+    select_supplement_regions,
+    validate_supplement,
 )
 from track_insight.settings import PocConfig
 
-PLANNING_PROCESSOR_VERSION = "planning-v1"
+PLANNING_PROCESSOR_VERSION = "planning-v3-compact-output"
 
 
 class PlanningService:
-    def __init__(self, *, client: BailianClient, config: PocConfig) -> None:
+    def __init__(self, *, client: BailianClient | None = None, config: PocConfig) -> None:
         self.client = client
         self.config = config
 
     def build(self, session: Session, scope: ResearchScope) -> ResearchPlan:
+        if self.client is None:
+            raise ContractError("a model client is required to generate a plan")
+        scope = expand_scope(scope)
         prompt_path = self.config.prompts.planning
         prompt = prompt_path.read_text(encoding="utf-8")
         prompt_version = _prompt_version(prompt_path, prompt)
@@ -82,17 +97,36 @@ class PlanningService:
             },
         )
         try:
-            result = self.client.complete_structured(
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {
-                        "role": "user",
-                        "content": json.dumps(input_payload, ensure_ascii=False),
-                    },
-                ],
-                output_model=PlanningOutput,
+
+            def complete_batch(name, payload):
+                batch = self.client.complete_structured(
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                    ],
+                    output_model=CompactPlanningOutput,
+                    model=self.config.bailian.model,
+                    max_tokens=8192,
+                    enable_thinking=False,
+                )
+                batch.output = expand_planning_output(
+                    batch.output,
+                    ResearchScope.model_validate(payload["scope"]),
+                    payload["region_refs"],
+                )
+                return batch
+
+            output, results = generate_covered_plan(scope, self.config, complete_batch)
+            result = ModelRunResult(
                 model=self.config.bailian.model,
-                max_tokens=8192,
+                output=output,
+                usage={
+                    key: sum(r.usage.get(key, 0) for r in results)
+                    for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                },
+                raw_response={"batches": [r.model_dump(mode="json") for r in results]},
+                call_count=sum(r.call_count for r in results),
+                recovery_used=any(r.recovery_used for r in results),
             )
             self._validate_output(scope, result.output)
         except (ModelCallError, ContractError) as error:
@@ -154,9 +188,106 @@ class PlanningService:
         )
         session.add(plan)
         session.flush()
-        for package_index, proposal in enumerate(result.output.work_packages, start=1):
+        self._persist_packages(session, plan.id, result.output.work_packages)
+        record_event(
+            session,
+            event_type="planning.completed",
+            message="Research planning completed",
+            pipeline_run_id=pipeline_run.id,
+            model_run_id=model_run.id,
+            entity_type="research_plan",
+            entity_id=plan.id,
+            duration_ms=int((time.monotonic() - operation_started) * 1000),
+            details={
+                **pipeline_run.counters,
+                "request_id": result.request_id,
+                "api_call_count": result.call_count,
+                "recovery_used": result.recovery_used,
+                "usage": result.usage,
+            },
+        )
+        session.flush()
+        return plan
+
+    def import_plan(
+        self,
+        session: Session,
+        scope: ResearchScope,
+        output: PlanningOutput,
+        *,
+        source_path: Path,
+        metadata_path: Path,
+    ) -> ResearchPlan:
+        scope = expand_scope(scope)
+        self._validate_output(scope, output)
+        import_key = fingerprint(
+            {
+                "scope": scope.model_dump(mode="json"),
+                "plan": output.model_dump(mode="json"),
+                "budgets": self.config.budgets.model_dump(mode="json"),
+            },
+            "saved-plan-import-v1",
+        )
+        for previous in session.scalars(
+            select(PipelineRun).where(
+                PipelineRun.run_type == "research_plan_import",
+                PipelineRun.status == TaskStatus.COMPLETED,
+            )
+        ):
+            if previous.input_payload.get("import_key") == import_key:
+                plan = session.get(ResearchPlan, uuid.UUID(previous.input_payload["plan_id"]))
+                if plan is not None:
+                    return plan
+        plan = ResearchPlan(
+            status=TaskStatus.COMPLETED,
+            config_version=self.config.version,
+            regions=scope.regions,
+            industry_scopes=scope.industry_scopes,
+            start_date=scope.start_date,
+            end_date=scope.end_date,
+        )
+        session.add(plan)
+        session.flush()
+        self._persist_packages(session, plan.id, output.work_packages)
+        validation = validate_plan(session, plan.id, self.config)
+        if not validation.valid:
+            raise ContractError("imported plan validation failed: " + "; ".join(validation.errors))
+        now = datetime.now(UTC)
+        run = PipelineRun(
+            run_type="research_plan_import",
+            status=TaskStatus.COMPLETED,
+            started_at=now,
+            finished_at=now,
+            input_payload={
+                "plan_id": str(plan.id),
+                "import_key": import_key,
+                "source_path": str(source_path.resolve()),
+                "metadata_path": str(metadata_path.resolve()),
+                "scope": scope.model_dump(mode="json"),
+            },
+            counters={
+                "work_packages": len(output.work_packages),
+                "search_tasks": validation.search_task_count,
+                "api_calls": 0,
+            },
+        )
+        session.add(run)
+        session.flush()
+        record_event(
+            session,
+            event_type="planning.imported",
+            message="Saved research plan imported",
+            pipeline_run_id=run.id,
+            entity_type="research_plan",
+            entity_id=plan.id,
+            details=run.input_payload,
+        )
+        return plan
+
+    def _persist_packages(self, session, plan_id, proposals, start=1):
+        for package_index, proposal in enumerate(proposals, start=start):
             work_package = ResearchWorkPackage(
-                research_plan_id=plan.id,
+                research_plan_id=plan_id,
                 sequence_no=package_index,
                 status=TaskStatus.PENDING,
                 objective=proposal.objective,
@@ -193,25 +324,119 @@ class PlanningService:
                     processor_version="search-review-v5-batched-all-sources",
                     max_attempts=self.config.bailian.max_retries + 1,
                 )
-        record_event(
-            session,
-            event_type="planning.completed",
-            message="Research planning completed",
-            pipeline_run_id=pipeline_run.id,
-            model_run_id=model_run.id,
-            entity_type="research_plan",
-            entity_id=plan.id,
-            duration_ms=int((time.monotonic() - operation_started) * 1000),
-            details={
-                **pipeline_run.counters,
-                "request_id": result.request_id,
-                "api_call_count": result.call_count,
-                "recovery_used": result.recovery_used,
-                "usage": result.usage,
-            },
+
+    def supplement(self, session: Session, plan_id, audit) -> int:
+        if self.client is None:
+            raise ContractError("a model client is required to supplement a plan")
+        previous = session.scalars(
+            select(PipelineRun).where(PipelineRun.run_type == "coverage_supplement")
         )
+        if any(p.input_payload.get("plan_id") == str(plan_id) for p in previous):
+            return 0
+        plan = session.get(ResearchPlan, plan_id)
+        packages = list(
+            session.scalars(
+                select(ResearchWorkPackage).where(ResearchWorkPackage.research_plan_id == plan_id)
+            )
+        )
+        regions = select_supplement_regions(
+            audit.region_coverage,
+            min(
+                self.config.coverage.max_supplement_regions,
+                self.config.budgets.max_work_packages - len(packages),
+            ),
+        )
+        if not regions:
+            return 0
+        existing = list(
+            session.scalars(
+                select(SearchTask)
+                .join(ResearchWorkPackage)
+                .where(ResearchWorkPackage.research_plan_id == plan_id)
+            )
+        )
+        payload = {
+            "plan_id": str(plan_id),
+            "scope": {
+                "regions": regions,
+                "industry_scopes": plan.industry_scopes,
+                "start_date": plan.start_date.isoformat(),
+                "end_date": plan.end_date.isoformat(),
+            },
+            "region_coverage": {r: audit.region_coverage[r] for r in regions},
+            "existing_queries": [t.query for t in existing if set(t.target_regions) & set(regions)],
+        }
+        path = self.config.prompts.planning_supplement
+        payload["region_refs"] = {f"G{i}": region for i, region in enumerate(regions, 1)}
+        prompt = path.read_text(encoding="utf-8")
+        pipeline = PipelineRun(
+            run_type="coverage_supplement",
+            status=TaskStatus.RUNNING,
+            input_payload=payload,
+            started_at=datetime.now(UTC),
+        )
+        session.add(pipeline)
         session.flush()
-        return plan
+        model_run = ModelRun(
+            pipeline_run_id=pipeline.id,
+            task_type="coverage_supplement_planning",
+            status=TaskStatus.RUNNING,
+            provider="bailian",
+            model=self.config.bailian.model,
+            prompt_version=_prompt_version(path, prompt),
+            input_fingerprint=fingerprint(payload),
+            started_at=datetime.now(UTC),
+        )
+        session.add(model_run)
+        session.commit()
+        try:
+            result = self.client.complete_structured(
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                output_model=CompactPlanningOutput,
+                model=self.config.bailian.model,
+                max_tokens=8192,
+                enable_thinking=False,
+            )
+            result.output = expand_planning_output(
+                result.output,
+                ResearchScope.model_validate(payload["scope"]),
+                payload["region_refs"],
+            )
+            validate_supplement(
+                result.output,
+                regions,
+                payload["existing_queries"],
+                plan.start_date.year,
+                plan.end_date.year,
+            )
+            self._persist_packages(
+                session,
+                plan_id,
+                result.output.work_packages,
+                max((p.sequence_no for p in packages), default=0) + 1,
+            )
+            model_run.request_id, model_run.usage = result.request_id, result.usage
+            model_run.raw_response = result.raw_response
+            model_run.structured_output = result.output.model_dump(mode="json")
+            model_run.status = pipeline.status = TaskStatus.COMPLETED
+            model_run.finished_at = pipeline.finished_at = datetime.now(UTC)
+            pipeline.counters = {"supplement_regions": regions, "new_queries": len(regions) * 2}
+            session.commit()
+            return len(regions)
+        except (ModelCallError, ContractError) as error:
+            model_run.status = pipeline.status = TaskStatus.FAILED_TERMINAL
+            model_run.error_message = str(error)
+            model_run.error_code = getattr(error, "code", "invalid_supplement")
+            if isinstance(error, ModelCallError):
+                model_run.request_id, model_run.usage, model_run.raw_response = (
+                    error.response_metadata()
+                )
+            model_run.finished_at = pipeline.finished_at = datetime.now(UTC)
+            session.commit()
+            raise
 
     def _validate_output(self, scope: ResearchScope, output: PlanningOutput) -> None:
         if len(output.work_packages) > self.config.budgets.max_work_packages:
@@ -224,6 +449,8 @@ class PlanningService:
             for task in package.search_tasks:
                 if not set(task.target_regions).issubset(scope.regions):
                     raise ContractError("search task contains region outside research scope")
+        if missing_regions(output, scope.regions):
+            raise ContractError("search plan omitted mandatory regions")
 
 
 def validate_plan(session: Session, plan_id: object, config: PocConfig) -> PlanValidationResult:
@@ -254,6 +481,16 @@ def validate_plan(session: Session, plan_id: object, config: PocConfig) -> PlanV
     covered = sorted({value for package in packages for value in package.source_classes})
     missing = sorted(set(config.coverage.required_source_classes) - set(covered))
     warnings = [f"missing source class: {value}" for value in missing]
+    covered_regions = {
+        task.target_regions[0]
+        for task in tasks
+        if len(task.target_regions) == 1 and query_is_regional(task.query, task.target_regions[0])
+    }
+    errors.extend(
+        f"missing regional search coverage: {region}"
+        for region in plan.regions
+        if region not in covered_regions
+    )
     return PlanValidationResult(
         valid=not errors,
         errors=errors,
