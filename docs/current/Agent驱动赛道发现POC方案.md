@@ -567,7 +567,7 @@ Track Agent 围绕共同企业原型归并 Topic。主要判断标准是：
 
 ### 5.1 模块划分
 
-在现有 Python、PostgreSQL、SQLAlchemy、任务表和 LLM 客户端基础上增加：
+在现有 Python、SQLite、SQLAlchemy、任务表和 LLM 客户端基础上增加：
 
 ```text
 research_planning      研究计划生成与校验

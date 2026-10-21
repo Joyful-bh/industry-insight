@@ -1,0 +1,78 @@
+﻿version: agent-poc-v1
+scope:
+  regions: [全国]
+  industry_scopes: [制造业]
+  start_date: 2025-10-09
+  end_date: 2026-10-09
+bailian:
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model: deepseek-v4.1-flash
+  search_max_output_tokens: 8192
+  review_batch_size: 10
+  timeout_seconds: 300
+  max_retries: 2
+  max_concurrency: 1
+search:
+  provider: bailian
+  selection: citations
+  strategy: lite
+  top_k: 10
+  queries_per_task: 3
+  timeout_seconds: 90
+budgets:
+  max_work_packages: 40
+  max_searches_per_work_package: 8
+  max_candidates_per_work_package: 300
+coverage:
+  required_source_classes:
+    - government
+    - park
+    - association
+    - company
+    - industry_media
+    - authoritative_media
+  dominant_domain_warning_ratio: 0.4
+prompts:
+  planning: config/prompts/planning_v1.md
+  search_review: config/prompts/search_review_v1.md
+stage2:
+  http_timeout_seconds: 30
+  http_max_retries: 2
+  http_min_interval_per_host_seconds: 1.0
+  max_response_bytes: 15728640
+  min_usable_text_chars: 500
+  max_model_input_chars: 80000
+  analysis_model: deepseek-v4.1-flash
+  web_extractor_model: deepseek-v4.1-flash
+  web_extractor_reasoning_effort: low
+  ocr_model: qwen3.5-ocr
+  analysis_max_output_tokens: 16384
+  web_extractor_max_output_tokens: 8192
+  prompts:
+    event_extraction: config/prompts/event_extraction_v2.md
+stage3:
+  model: deepseek-v4.1-flash
+  event_batch_size: 20
+  max_events_per_run: 20000
+  minimum_event_confidence: 0.70
+  generation_max_output_tokens: 8192
+  prompts:
+    topic_generation: config/prompts/topic_generation_v1.md
+stage4:
+  smb_product_catalog: docs/reference/联想SMB产品服务列表.md
+  market_merge_strategy: bounded_direct
+  model: deepseek-v4.1-flash
+  minimum_supporting_events: 1
+  forbid_region_in_identity: true
+  target_track_boundary: >
+    仅形成制造业企业本身的赛道。赛道应由制造企业持续研发、生产或制造的产品、材料、
+    零部件、设备或工业软件识别。一般法律、金融、保险、培训、公共服务、园区运营、
+    设施运营、招商平台、消费服务和仅使用制造业产品的应用方不形成赛道。
+  generation_max_output_tokens: 16384
+  analysis_max_output_tokens: 8192
+  prompts:
+    track_generation: config/prompts/track_generation_v1.md
+    track_analysis: config/prompts/track_analysis_v1.md
+    track_definition: config/prompts/track_definition_v1.md
+    track_market_catalog: config/prompts/track_market_coarse_c.md
+

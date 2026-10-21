@@ -1,0 +1,6 @@
+interface:
+  display_name: "企业赛道归类"
+  short_description: "使用企业 Excel 与赛道定义完成百炼 API 归类并交付带判断列的工作簿"
+  default_prompt: "使用 $company-track-labeling，根据企业 Excel 和赛道文件完成归类，必要时引导我获取并配置百炼 API Key。"
+policy:
+  allow_implicit_invocation: true

@@ -16,7 +16,7 @@ from track_insight.discovery.coverage import build_coverage_audit
 from track_insight.discovery.search import SearchService
 from track_insight.events.service import EventService, list_events, stage2_status
 from track_insight.infrastructure.bailian.client import BailianClient
-from track_insight.infrastructure.database import check_database, session_scope
+from track_insight.infrastructure.database import check_database, initialize_database, session_scope
 from track_insight.infrastructure.logging import configure_logging
 from track_insight.infrastructure.models import PipelineRun, RunEvent
 from track_insight.pipeline import (
@@ -66,6 +66,14 @@ def config_show(config_path: Path = Path("config/poc.yaml")) -> None:
 def db_check() -> None:
     check_database()
     typer.echo("database connection ok")
+
+
+@app.command("db-init")
+def db_init() -> None:
+    """Initialize the local SQLite database or missing tables in another backend."""
+    initialize_database()
+    check_database()
+    typer.echo("database initialized")
 
 
 @app.command("pipeline-run")

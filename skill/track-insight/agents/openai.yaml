@@ -1,0 +1,6 @@
+interface:
+  display_name: "赛道洞察"
+  short_description: "从政策与市场信号生成可追溯赛道洞察及离线看板"
+  default_prompt: "Use $track-insight to research an industry scope and produce an evidence-backed track dashboard."
+policy:
+  allow_implicit_invocation: true

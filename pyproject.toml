@@ -10,7 +10,6 @@ dependencies = [
     "fonttools>=4.0,<5",
     "httpx>=0.28,<1",
     "numpy>=2,<3",
-    "psycopg[binary]>=3.2,<4",
     "pypdf>=6.0,<7",
     "pydantic-settings>=2.7,<3",
     "pyyaml>=6.0,<7",
@@ -40,7 +39,7 @@ packages = ["src/track_insight"]
 addopts = "-q -p no:cacheprovider -p no:tmpdir"
 testpaths = ["tests"]
 markers = [
-    "integration: requires a running PostgreSQL database",
+    "integration: exercises persistent database behavior",
     "live: requires a real Alibaba Cloud Model Studio API key and performs billable requests",
 ]
 

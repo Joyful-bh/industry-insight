@@ -14,7 +14,6 @@ from track_insight.core.errors import ContractError, ModelCallError
 from track_insight.core.fingerprints import fingerprint
 from track_insight.discovery.contracts import SearchReviewOutput, SearchRunSummary
 from track_insight.discovery.coverage import build_coverage_audit
-from track_insight.discovery.opensearch import search_and_review as opensearch_search_and_review
 from track_insight.discovery.url_registry import register_candidate
 from track_insight.infrastructure.bailian.client import BailianClient
 from track_insight.infrastructure.bailian.contracts import WebSearchSource
@@ -433,24 +432,15 @@ class SearchService:
                     "content": json.dumps(task_payload, ensure_ascii=False),
                 },
             ]
-            if self.config.search.provider == "opensearch":
-                result = opensearch_search_and_review(
-                    client=self.client,
-                    config=self.config,
-                    messages=messages,
-                    output_model=SearchReviewOutput,
-                    on_sources_discovered=persist_discovered_sources,
-                )
-            else:
-                result = self.client.search_and_review(
-                    messages=messages,
-                    output_model=SearchReviewOutput,
-                    model=self.config.bailian.model,
-                    review_batch_size=self.config.bailian.review_batch_size,
-                    search_max_output_tokens=self.config.bailian.search_max_output_tokens,
-                    on_sources_discovered=persist_discovered_sources,
-                    cited_only=cited_only,
-                )
+            result = self.client.search_and_review(
+                messages=messages,
+                output_model=SearchReviewOutput,
+                model=self.config.bailian.model,
+                review_batch_size=self.config.bailian.review_batch_size,
+                search_max_output_tokens=self.config.bailian.search_max_output_tokens,
+                on_sources_discovered=persist_discovered_sources,
+                cited_only=cited_only,
+            )
             if not cited_only:
                 result.raw_response["review_constraints"] = apply_review_constraints(
                     result.output, result.web_search, task_payload

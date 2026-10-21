@@ -1,0 +1,315 @@
+import uuid
+
+import pytest
+
+from track_insight.core.errors import ContractError
+from track_insight.settings import load_poc_config
+from track_insight.tracks.contracts import (
+    IdentifiedTrackBuildOutput,
+    TrackAnalysisOutput,
+    TrackBuildOutput,
+)
+from track_insight.tracks.service import (
+    _combine_exact_track_identities,
+    _compact_text,
+    _event_ids_for_topic_ids,
+    _expand_topic_refs,
+    _normalize_build_output,
+    _validate_build,
+    _validate_generation_reference_coverage,
+)
+
+
+def test_identified_tracks_combine_only_on_family_and_role() -> None:
+    output = IdentifiedTrackBuildOutput.model_validate(
+        {
+            "tracks": [
+                {
+                    "name": "DRAM芯片设计",
+                    "offering_family": "DRAM 芯片",
+                    "supplier_role": "DESIGN_PRODUCT",
+                    "refs": ["T1"],
+                    "supporting_refs": ["T4"],
+                },
+                {
+                    "name": "三维DRAM芯片设计",
+                    "offering_family": "DRAM芯片",
+                    "supplier_role": "DESIGN_PRODUCT",
+                    "refs": ["T2"],
+                    "supporting_refs": ["T5"],
+                },
+                {
+                    "name": "DRAM芯片制造",
+                    "offering_family": "DRAM芯片",
+                    "supplier_role": "MANUFACTURE_PRODUCT",
+                    "refs": ["T3"],
+                },
+            ]
+        }
+    )
+
+    combined = _combine_exact_track_identities(output.tracks)
+
+    assert len(combined) == 2
+    assert combined[0].refs == ["T1", "T2"]
+    assert combined[0].supporting_refs == ["T4", "T5"]
+    assert combined[1].refs == ["T3"]
+
+
+def test_compact_track_refs_expand_to_topic_ids() -> None:
+    first_id = uuid.uuid4()
+    second_id = uuid.uuid4()
+    supporting_id = uuid.uuid4()
+    compact = IdentifiedTrackBuildOutput.model_validate(
+        {
+            "tracks": [
+                {
+                    "name": "工业视觉质检",
+                    "offering_family": "工业视觉质检系统",
+                    "supplier_role": "MANUFACTURE_PRODUCT",
+                    "refs": ["T1", "T2", "UNKNOWN"],
+                    "supporting_refs": ["T3"],
+                }
+            ]
+        }
+    )
+
+    topics = {
+        first_id: type("Topic", (), {"definition": "工业视觉检测设备企业集合。"})(),
+        second_id: type("Topic", (), {"definition": "工业视觉检测软件企业集合。"})(),
+        supporting_id: type("Topic", (), {"definition": "工业视觉支持政策。"})(),
+    }
+    session = _CapturingSession([uuid.uuid4(), uuid.uuid4()])
+    expanded = _expand_topic_refs(
+        session,
+        compact,
+        {"T1": first_id, "T2": second_id, "T3": supporting_id},
+        topics,
+    )
+
+    assert expanded.tracks[0].topic_ids == [first_id, second_id]
+    assert expanded.tracks[0].supporting_topic_ids == [supporting_id]
+    assert expanded.tracks[0].offering_family == "工业视觉质检系统"
+    assert expanded.tracks[0].supplier_role == "MANUFACTURE_PRODUCT"
+    assert expanded.tracks[0].status == "candidate"
+    assert expanded.tracks[0].definition.startswith("围绕工业视觉质检")
+
+
+def test_identified_track_rejects_overlapping_core_and_supporting_refs() -> None:
+    with pytest.raises(ValueError, match="must be disjoint"):
+        IdentifiedTrackBuildOutput.model_validate(
+            {
+                "tracks": [
+                    {
+                        "name": "工业视觉质检",
+                        "offering_family": "工业视觉质检系统",
+                        "supplier_role": "MANUFACTURE_PRODUCT",
+                        "refs": ["T1"],
+                        "supporting_refs": ["T1"],
+                    }
+                ]
+            }
+        )
+
+
+def test_generation_requires_complete_topic_reference_accounting() -> None:
+    output = IdentifiedTrackBuildOutput.model_validate(
+        {
+            "tracks": [
+                {
+                    "name": "工业视觉质检",
+                    "offering_family": "工业视觉质检系统",
+                    "supplier_role": "MANUFACTURE_PRODUCT",
+                    "refs": ["T1"],
+                    "supporting_refs": ["T2"],
+                }
+            ],
+            "excluded_refs": ["T3"],
+        }
+    )
+    _validate_generation_reference_coverage(output, {"T1", "T2", "T3"})
+
+    with pytest.raises(ContractError, match="account for every"):
+        _validate_generation_reference_coverage(output, {"T1", "T2", "T3", "T4"})
+
+
+def test_track_input_text_is_compact_and_readable() -> None:
+    assert _compact_text("  智能\n  算力平台  ", 20) == "智能 算力平台"
+    assert _compact_text("甲乙丙丁戊", 4) == "甲乙丙…"
+
+
+class _Topic:
+    def __init__(self, topic_id: uuid.UUID, regions: list[str] | None = None) -> None:
+        self.id = topic_id
+        self.regions = regions or []
+
+
+class _CapturingSession:
+    def __init__(self, event_ids: list[uuid.UUID]) -> None:
+        self.event_ids = event_ids
+        self.statement = None
+
+    def scalars(self, statement):
+        self.statement = statement
+        return self.event_ids
+
+
+def _track(topic_id: uuid.UUID) -> dict:
+    return {
+        "name": "工业视觉质检设备与解决方案",
+        "offering_family": "工业视觉质检设备",
+        "supplier_role": "MANUFACTURE_PRODUCT",
+        "definition": "从事工业视觉检测设备、软件及整体解决方案研发和交付的企业集合。",
+        "topic_ids": [str(topic_id)],
+        "status": "candidate",
+        "confidence": 0.9,
+    }
+
+
+def test_track_event_lookup_deduplicates_only_event_ids() -> None:
+    event_id = uuid.uuid4()
+    session = _CapturingSession([event_id, event_id])
+    result = _event_ids_for_topic_ids(session, [uuid.uuid4(), uuid.uuid4()])
+    assert result == {event_id}
+    assert list(session.statement.selected_columns)[0].name == "event_id"
+    assert session.statement._distinct is True
+
+
+def test_track_build_contract_uses_topic_ids() -> None:
+    topic_id = uuid.uuid4()
+    output = TrackBuildOutput.model_validate({"tracks": [_track(topic_id)]})
+    assert output.tracks[0].topic_ids == [topic_id]
+
+
+def test_track_analysis_contract_preserves_business_to_it_chain() -> None:
+    event_id = uuid.uuid4()
+    output = TrackAnalysisOutput.model_validate(
+        {
+            "enterprise_archetype": "工业视觉设备制造商、质检软件企业和系统解决方案商。",
+            "core_products_services": ["工业视觉质检设备与软件"],
+            "core_company_types": ["工业视觉设备与解决方案企业"],
+            "supporting_company_types": ["视觉算法与光学组件企业"],
+            "shared_demand_drivers": ["制造企业自动化质量检测需求"],
+            "included_activities": ["视觉检测设备研发制造"],
+            "excluded_activities": ["仅使用视觉质检的制造企业"],
+            "chain_roles": ["设备供应商", "系统集成商"],
+            "observable_company_features": ["存在产品目录", "公开工业质检项目案例"],
+            "possible_it_needs": ["AI训练与推理算力"],
+            "summary": "候选赛道围绕工业视觉设备和解决方案企业形成。",
+            "why_now": "近期出现产业集群认定和园区启用等不同类型信号。",
+            "activity_assessment": {
+                "label": "recently_active",
+                "historical_comparability": False,
+                "basis": "存在近期信号，但缺少可比历史基线。",
+            },
+            "industry_chain_analysis": "企业主要位于设备、软件和系统交付环节。",
+            "smb_value_analysis": [
+                {
+                    "business_activity": "视觉模型研发和现场交付",
+                    "workload": "图像训练、推理和项目数据管理",
+                    "it_need": "AI工作站、边缘计算和存储",
+                    "coverage_path": "按研发及项目团队提供标准化配置",
+                }
+            ],
+            "evidence_event_ids": [str(event_id)],
+            "uncertainties": ["缺少企业规模分布"],
+        }
+    )
+    assert output.smb_value_analysis[0].it_need.startswith("AI工作站")
+
+
+def test_track_build_allows_topics_to_remain_unassigned_implicitly() -> None:
+    topic_id = uuid.uuid4()
+    output = TrackBuildOutput.model_validate({"tracks": []})
+    _validate_build(None, output, [_Topic(topic_id)], load_poc_config())
+
+
+def test_track_build_rejects_core_topic_reuse_across_tracks() -> None:
+    topic_id = uuid.uuid4()
+    first = _track(topic_id)
+    second = {**_track(topic_id), "name": "工业视觉设备制造", "offering_family": "视觉设备"}
+    output = TrackBuildOutput.model_validate({"tracks": [first, second]})
+
+    with pytest.raises(ContractError, match="distinct identity evidence"):
+        _validate_build(None, output, [_Topic(topic_id)], load_poc_config())
+
+
+def test_direct_market_partition_can_retain_shared_source_evidence() -> None:
+    topic_id, event_id = uuid.uuid4(), uuid.uuid4()
+    first = dict(_track(topic_id), identity_event_ids=[event_id])
+    second = dict(first, name="工业视觉设备制造", offering_family="视觉设备")
+    output = TrackBuildOutput.model_validate({"tracks": [first, second]})
+    _validate_build(
+        _CapturingSession([event_id]), output, [_Topic(topic_id)], load_poc_config(),
+        allow_shared_market_evidence=True,
+    )
+    assert all(track.identity_event_ids == [event_id] for track in output.tracks)
+
+
+def test_shared_topic_requires_disjoint_event_proof_and_cannot_be_excluded():
+    def track(name, event):
+        return dict(
+            name=name,
+            offering_family=name,
+            supplier_role="MANUFACTURE_PRODUCT",
+            refs=["T1"],
+            core_event_refs=[event],
+        )
+
+    value = dict(
+        tracks=[track("产品甲", "E1"), track("产品乙", "E2")], excluded_refs=["T1", "T2", "T2"]
+    )
+    result = IdentifiedTrackBuildOutput.model_validate(value)
+    assert result.excluded_refs == ["T2"]
+    value["tracks"][1]["core_event_refs"] = ["E1"]
+    with pytest.raises(ValueError, match="distinct core event evidence"):
+        IdentifiedTrackBuildOutput.model_validate(value)
+
+
+def test_shared_supporting_policy_is_not_a_second_core_identity():
+    first = dict(
+        name="产品甲",
+        offering_family="产品甲",
+        supplier_role="MANUFACTURE_PRODUCT",
+        refs=["T1"],
+        core_event_refs=["E1"],
+        supporting_refs=["T3"],
+    )
+    second = dict(first, name="产品乙", offering_family="产品乙", refs=["T2"])
+    result = IdentifiedTrackBuildOutput.model_validate(dict(tracks=[first, second]))
+    assert len(result.tracks) == 2
+
+
+def test_track_build_accepts_one_supporting_event() -> None:
+    topic_id = uuid.uuid4()
+    output = TrackBuildOutput.model_validate({"tracks": [_track(topic_id)]})
+    session = _CapturingSession([uuid.uuid4()])
+
+    _validate_build(session, output, [_Topic(topic_id)], load_poc_config())
+
+
+def test_track_build_normalizes_region_identity_without_failing_batch() -> None:
+    topic_id = uuid.uuid4()
+    item = _track(topic_id)
+    item["name"] = "北京市工业视觉质检"
+    output = TrackBuildOutput.model_validate({"tracks": [item]})
+    session = _CapturingSession([uuid.uuid4()])
+
+    adjustments = _normalize_build_output(session, output, [_Topic(topic_id, ["北京市"])])
+
+    assert output.tracks[0].name == "工业视觉质检"
+    assert output.tracks[0].status == "watchlist"
+    assert adjustments[0]["action"] == "region_removed_and_marked_watchlist"
+
+
+def test_track_build_drops_policy_instrument_identity() -> None:
+    topic_id = uuid.uuid4()
+    item = _track(topic_id)
+    item["name"] = "先进制造业税收优惠"
+    output = TrackBuildOutput.model_validate({"tracks": [item]})
+    session = _CapturingSession([uuid.uuid4()])
+
+    adjustments = _normalize_build_output(session, output, [_Topic(topic_id)])
+
+    assert output.tracks == []
+    assert adjustments[0]["reason"] == "identity describes a policy instrument or transient signal"

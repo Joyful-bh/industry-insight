@@ -9,4 +9,4 @@
 
 ## 历史归档
 
-`archive/engineering-v0/` 保存早期工程化采集方案、来源库和阶段验证记录；`archive/skill-experiment/` 保存已经停止采用的 Skill 方案文档。归档内容用于追溯方案演进，不代表当前运行方式。
+`archive/engineering-v0/` 保存早期工程化采集方案、来源库和阶段验证记录。归档内容用于追溯方案演进，不代表当前运行方式。

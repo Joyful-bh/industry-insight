@@ -18,7 +18,7 @@
 → 生成业务看板
 ```
 
-程序负责数据持久化、任务队列、幂等、失败记录、断点恢复和结果渲染；阿里云百炼模型负责研究规划、联网搜索和复杂语义判断。该系统需要持续、批量运行，不以 Skill 作为主要执行方式。
+程序负责数据持久化、任务队列、幂等、失败记录、断点恢复和结果渲染；阿里云百炼模型负责研究规划、联网搜索和复杂语义判断。`skill/track-insight/` 提供面向 Codex 和 WorkBuddy 的完整 Agent 调用入口。
 
 ## 当前验证结果
 
@@ -45,7 +45,7 @@ docs/
   reference/            业务参考资料
   archive/              早期方案和历史验证记录
 logs/                   当前运行日志及历史日志归档
-migrations/             PostgreSQL 数据库迁移
+migrations/             早期数据库版本迁移记录
 reports/                最新看板及历史报告归档
 src/track_insight/
   planning/             研究计划
@@ -57,6 +57,7 @@ src/track_insight/
   reporting/            看板生成
   infrastructure/       数据库、任务、日志和百炼客户端
 tests/                   单元、集成和真实 API 测试
+skill/track-insight/     可独立分发的 Agent Skill 与运行程序
 ```
 
 文档入口见 [docs/README.md](docs/README.md)。
@@ -64,7 +65,6 @@ tests/                   单元、集成和真实 API 测试
 ## 环境要求
 
 - Python 3.12 或 3.13；
-- PostgreSQL 17；
 - 支持 `pip` 的 Python 环境；
 - 阿里云百炼 API Key。
 
@@ -73,8 +73,7 @@ tests/                   单元、集成和真实 API 测试
 ```powershell
 Copy-Item .env.example .env
 python -m pip install -e ".[dev]"
-docker compose up -d postgres
-python -m alembic upgrade head
+python -m track_insight db-init
 python -m track_insight db-check
 ```
 
@@ -176,7 +175,7 @@ python -m track_insight url-status <plan-id>
 默认使用百炼联网搜索，`search.selection: citations` 由程序收集综述引用的 URL，
 直接作为待核验候选交给页面下载、清洗及事件抽取，不调用独立 URL 审核模型。
 引用只表示候选选择，不表示网页相关性或日期已核验。所有召回 URL 和原始综述仍保存到数据库。
-`search.selection: model_review` 可启用逐网页审核；OpenSearch 作为可选搜索接口保留。
+`search.selection: model_review` 可启用逐网页审核。搜索和模型调用统一使用阿里云百炼。
 
 只运行全国搜索阶段的小批任务：
 

@@ -1,0 +1,8 @@
+根据薄弱地区的搜索覆盖统计和已有查询，为每个指定地区生成一个补查任务包，每包仅2条新查询。
+这是唯一一轮有限补查，不追求各地材料数量相同。
+查询必须包含该地区名称或简称以及研究年份，符合制造业范围和70字符上限，不重复已有查询。
+no_retained_content：改变检索措辞与来源线索，寻找具体政策原文或产业事件。
+no_government_content：优先查询当地政府、工信主管部门的制造业政策原文。
+time_distribution_gap：优先查询材料薄弱的半段时间，不以政策次数少为由认定行业不重要。
+不能把执行失败当成没有行业信号，不能为了凑数量编造事件或企业。每任务只标记一个指定地区。
+仅输出紧凑 JSON：work_packages 每项含 region_ref 和 search_tasks。region_ref 引用输入 region_refs 的 G1、G2 等编号；任务只含 query、purpose、target_industries、target_signal_types、target_source_classes。地区与任务包背景由程序回填。

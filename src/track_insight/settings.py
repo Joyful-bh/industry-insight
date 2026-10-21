@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = Field(
-        default="postgresql+psycopg://track_insight:track_insight@localhost:5432/track_insight",
+        default="sqlite:///data/track_insight.sqlite3",
         validation_alias="TRACK_INSIGHT_DATABASE_URL",
     )
     log_level: str = Field(default="INFO", validation_alias="TRACK_INSIGHT_LOG_LEVEL")
@@ -31,11 +31,6 @@ class Settings(BaseSettings):
     bailian_api_key: SecretStr | None = Field(default=None, validation_alias="DASHSCOPE_API_KEY")
     bailian_model: str | None = Field(default=None, validation_alias="BAILIAN_MODEL")
     bailian_base_url: str | None = Field(default=None, validation_alias="BAILIAN_BASE_URL")
-    opensearch_api_key: SecretStr | None = Field(
-        default=None, validation_alias="OPENSEARCH_API_KEY"
-    )
-    opensearch_base_url: str | None = Field(default=None, validation_alias="OPENSEARCH_BASE_URL")
-    opensearch_workspace: str = Field(default="default", validation_alias="OPENSEARCH_WORKSPACE")
 
 
 class ScopeConfig(BaseModel):
@@ -56,7 +51,7 @@ class BailianConfig(BaseModel):
 
 
 class SearchConfig(BaseModel):
-    provider: Literal["bailian", "opensearch"] = "bailian"
+    provider: Literal["bailian"] = "bailian"
     selection: Literal["citations", "model_review"] = "citations"
     strategy: Literal["lite", "pro"] = "lite"
     top_k: int = Field(default=10, ge=1, le=50)

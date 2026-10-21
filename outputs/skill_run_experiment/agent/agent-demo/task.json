@@ -1,0 +1,40 @@
+{
+  "mode": "agent_native_demo",
+  "scope": {
+    "regions": [
+      "北京市"
+    ],
+    "industries": [
+      "人形机器人产业"
+    ],
+    "start_date": "2026-01-01",
+    "end_date": "2026-10-12"
+  },
+  "instructions": [
+    "Use current web tools or user-provided materials; do not invent sources.",
+    "Prefer primary government, association, park, and company sources.",
+    "Keep fact, analysis, and SMB recommendation distinguishable.",
+    "This is a limited demonstration, not complete market coverage or trend proof."
+  ],
+  "result_schema": {
+    "summary": "string",
+    "coverage_note": "string",
+    "tracks": [
+      {
+        "name": "string",
+        "definition": "string",
+        "why_now": "string",
+        "smb_value": "string",
+        "confidence": "number 0..1",
+        "evidence": [
+          {
+            "title": "string",
+            "url": "https URL",
+            "quote": "string",
+            "date": "string"
+          }
+        ]
+      }
+    ]
+  }
+}

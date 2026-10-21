@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import and_, or_, select, update
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from track_insight.core.enums import TaskStatus
@@ -40,28 +40,26 @@ def enqueue_job(
     existing = session.scalar(select(Job).where(Job.idempotency_key == key))
     if existing is not None:
         return existing
-    job_id = uuid.uuid4()
-    inserted_id = session.scalar(
-        insert(Job)
-        .values(
-            id=job_id,
-            job_type=job_type,
-            object_type=object_type,
-            object_id=object_id,
-            idempotency_key=key,
-            input_fingerprint=input_fingerprint,
-            processor_version=processor_version,
-            status=TaskStatus.PENDING,
-            priority=priority,
-            attempts=0,
-            max_attempts=max_attempts,
-        )
-        .on_conflict_do_nothing(index_elements=[Job.idempotency_key])
-        .returning(Job.id)
+    job = Job(
+        id=uuid.uuid4(),
+        job_type=job_type,
+        object_type=object_type,
+        object_id=object_id,
+        idempotency_key=key,
+        input_fingerprint=input_fingerprint,
+        processor_version=processor_version,
+        status=TaskStatus.PENDING,
+        priority=priority,
+        attempts=0,
+        max_attempts=max_attempts,
     )
-    if inserted_id is not None:
-        return session.get(Job, inserted_id)
-    return session.scalar(select(Job).where(Job.idempotency_key == key))
+    try:
+        with session.begin_nested():
+            session.add(job)
+            session.flush()
+        return job
+    except IntegrityError:
+        return session.scalar(select(Job).where(Job.idempotency_key == key))
 
 
 def claim_job(
