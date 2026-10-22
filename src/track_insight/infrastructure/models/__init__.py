@@ -1,4 +1,9 @@
 from track_insight.infrastructure.models.base import Base
+from track_insight.infrastructure.models.directions import (
+    Direction,
+    DirectionBuildRun,
+    DirectionTopic,
+)
 from track_insight.infrastructure.models.operations import Job, ModelRun, PipelineRun, RunEvent
 from track_insight.infrastructure.models.research import (
     Event,
@@ -28,6 +33,9 @@ from track_insight.infrastructure.models.tracks import (
 
 __all__ = [
     "Base",
+    "Direction",
+    "DirectionBuildRun",
+    "DirectionTopic",
     "Event",
     "EventEvidence",
     "Job",

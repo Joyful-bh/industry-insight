@@ -1,0 +1,179 @@
+{
+  "status": "completed",
+  "stage": "completed",
+  "started_at": "2026-10-21T10:20:18.593415+00:00",
+  "finished_at": "2026-10-21T10:20:42.532259+00:00",
+  "topic_count": 115,
+  "assigned_topic_count": 115,
+  "discarded_topic_count": 0,
+  "direction_count": 50,
+  "group_count": 2,
+  "workers": 4,
+  "output_csv": "D:\\Work\\行业信号洞察与客户标签\\outputs\\direction_sample_automation_science\\directions.csv",
+  "usage": {
+    "topic_embeddings": [
+      {
+        "prompt_tokens": 463,
+        "total_tokens": 463
+      },
+      {
+        "prompt_tokens": 364,
+        "total_tokens": 364
+      },
+      {
+        "prompt_tokens": 450,
+        "total_tokens": 450
+      },
+      {
+        "prompt_tokens": 327,
+        "total_tokens": 327
+      },
+      {
+        "prompt_tokens": 420,
+        "total_tokens": 420
+      },
+      {
+        "prompt_tokens": 372,
+        "total_tokens": 372
+      },
+      {
+        "prompt_tokens": 392,
+        "total_tokens": 392
+      },
+      {
+        "prompt_tokens": 438,
+        "total_tokens": 438
+      },
+      {
+        "prompt_tokens": 436,
+        "total_tokens": 436
+      },
+      {
+        "prompt_tokens": 386,
+        "total_tokens": 386
+      },
+      {
+        "prompt_tokens": 457,
+        "total_tokens": 457
+      },
+      {
+        "prompt_tokens": 183,
+        "total_tokens": 183
+      }
+    ],
+    "grouping": [
+      {
+        "attempts": [
+          {
+            "attempt": 1,
+            "request_id": "chatcmpl-cc9fb708-ea25-9530-ad93-10548ad5db82",
+            "usage": {
+              "completion_tokens": 1463,
+              "completion_tokens_details": {
+                "text_tokens": 1463
+              },
+              "prompt_tokens": 4810,
+              "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "text_tokens": 4810
+              },
+              "total_tokens": 6273
+            }
+          }
+        ]
+      },
+      {
+        "attempts": [
+          {
+            "attempt": 1,
+            "request_id": "chatcmpl-861990e2-0ba5-9c8c-8264-131abb1db8c9",
+            "usage": {
+              "completion_tokens": 2394,
+              "completion_tokens_details": {
+                "text_tokens": 2394
+              },
+              "prompt_tokens": 5302,
+              "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "text_tokens": 5302
+              },
+              "total_tokens": 7696
+            }
+          }
+        ]
+      }
+    ],
+    "deduplication": {
+      "candidate_components": 2,
+      "embedding": [
+        {
+          "prompt_tokens": 351,
+          "total_tokens": 351
+        },
+        {
+          "prompt_tokens": 403,
+          "total_tokens": 403
+        },
+        {
+          "prompt_tokens": 415,
+          "total_tokens": 415
+        },
+        {
+          "prompt_tokens": 328,
+          "total_tokens": 328
+        },
+        {
+          "prompt_tokens": 377,
+          "total_tokens": 377
+        },
+        {
+          "prompt_tokens": 54,
+          "total_tokens": 54
+        }
+      ],
+      "calls": [
+        {
+          "attempts": [
+            {
+              "attempt": 1,
+              "request_id": "chatcmpl-f89f3dce-aa87-9783-9059-82e0b8e9c2e8",
+              "usage": {
+                "completion_tokens": 66,
+                "completion_tokens_details": {
+                  "text_tokens": 67
+                },
+                "prompt_tokens": 432,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0,
+                  "text_tokens": 432
+                },
+                "total_tokens": 498
+              }
+            }
+          ]
+        },
+        {
+          "attempts": [
+            {
+              "attempt": 1,
+              "request_id": "chatcmpl-bf42bd79-1f1a-99c6-93c1-2d98bf91d5e4",
+              "usage": {
+                "completion_tokens": 50,
+                "completion_tokens_details": {
+                  "text_tokens": 50
+                },
+                "prompt_tokens": 415,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0,
+                  "text_tokens": 415
+                },
+                "total_tokens": 465
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "updated_at": "2026-10-21T10:20:42.532259+00:00"
+}

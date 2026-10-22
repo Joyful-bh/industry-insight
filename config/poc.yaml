@@ -51,6 +51,17 @@ stage3:
   generation_max_output_tokens: 8192
   prompts:
     topic_generation: config/prompts/topic_generation_v1.md
+directions:
+  model: deepseek-v4.1-flash
+  embedding_model: text-embedding-v4
+  group_topics: 80
+  overlap_ratio: 0.20
+  deduplication_similarity: 0.88
+  deduplication_batch_directions: 80
+  max_output_tokens: 8192
+  prompts:
+    grouping: config/prompts/direction_grouping_v1.md
+    deduplication: config/prompts/direction_deduplication_v1.md
 stage4:
   smb_product_catalog: docs/reference/联想SMB产品服务列表.md
   market_merge_strategy: bounded_direct

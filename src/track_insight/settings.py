@@ -112,6 +112,22 @@ class Stage3Config(BaseModel):
     prompts: Stage3PromptConfig
 
 
+class DirectionPromptConfig(BaseModel):
+    grouping: Path = Path("config/prompts/direction_grouping_v1.md")
+    deduplication: Path = Path("config/prompts/direction_deduplication_v1.md")
+
+
+class DirectionConfig(BaseModel):
+    model: str = "deepseek-v4.1-flash"
+    embedding_model: str = "text-embedding-v4"
+    group_topics: int = Field(default=80, ge=20, le=150)
+    overlap_ratio: float = Field(default=0.20, ge=0, lt=0.5)
+    deduplication_similarity: float = Field(default=0.88, ge=0, le=1)
+    deduplication_batch_directions: int = Field(default=80, ge=10, le=150)
+    max_output_tokens: int = Field(default=8192, ge=512, le=32_768)
+    prompts: DirectionPromptConfig = Field(default_factory=DirectionPromptConfig)
+
+
 class Stage4PromptConfig(BaseModel):
     track_generation: Path
     track_analysis: Path
@@ -147,6 +163,7 @@ class PocConfig(BaseModel):
     prompts: PromptConfig
     stage2: Stage2Config
     stage3: Stage3Config
+    directions: DirectionConfig = Field(default_factory=DirectionConfig)
     stage4: Stage4Config
 
 
@@ -165,6 +182,7 @@ def load_poc_config(path: Path = Path("config/poc.yaml")) -> PocConfig:
         config.stage2.analysis_model = model_override.strip()
         config.stage2.web_extractor_model = model_override.strip()
         config.stage3.model = model_override.strip()
+        config.directions.model = model_override.strip()
         config.stage4.model = model_override.strip()
     if settings.bailian_base_url and settings.bailian_base_url.strip():
         config.bailian.base_url = settings.bailian_base_url.strip()

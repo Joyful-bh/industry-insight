@@ -12,6 +12,8 @@ from track_insight import __version__
 from track_insight.content.service import PageService
 from track_insight.core.enums import SearchDecision
 from track_insight.core.errors import TrackInsightError
+from track_insight.directions.queries import list_directions
+from track_insight.directions.service import DirectionService, direction_status
 from track_insight.discovery.coverage import build_coverage_audit
 from track_insight.discovery.search import SearchService
 from track_insight.events.service import EventService, list_events, stage2_status
@@ -410,6 +412,42 @@ def topic_show(topic_id: str) -> None:
     if result is None:
         typer.echo("Topic not found", err=True)
         raise typer.Exit(code=1)
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+@app.command("direction-build")
+def direction_build(
+    plan_id: str,
+    max_topics: Annotated[int | None, typer.Option(min=1)] = None,
+    config_path: Path = Path("config/poc.yaml"),
+) -> None:
+    config = load_poc_config(config_path)
+    client = _build_client(config)
+    try:
+        with session_scope() as session:
+            result = DirectionService(client=client, config=config).build(
+                session, plan_id=_uuid(plan_id), max_topics=max_topics
+            )
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+    except TrackInsightError as error:
+        raise typer.Exit(code=1) from _echo_error(error)
+    finally:
+        client.close()
+
+
+@app.command("direction-status")
+def direction_plan_status(plan_id: str) -> None:
+    with session_scope() as session:
+        result = direction_status(session, _uuid(plan_id))
+    typer.echo(result.model_dump_json(indent=2))
+
+
+@app.command("direction-list")
+def direction_list(
+    plan_id: str, limit: Annotated[int, typer.Option(min=1, max=1000)] = 100
+) -> None:
+    with session_scope() as session:
+        result = list_directions(session, _uuid(plan_id), limit=limit)
     typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
 
 

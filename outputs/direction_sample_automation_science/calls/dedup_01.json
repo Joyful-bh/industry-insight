@@ -1,0 +1,47 @@
+{
+  "input": {
+    "directions": [
+      {
+        "direction_ref": "D4",
+        "name": "仪器仪表",
+        "definition": "以工业测量、环境监测、科学分析等用途为核心的仪器仪表产品研发与制造活动，包括智能仪器仪表及高可靠压力变送器等。"
+      },
+      {
+        "direction_ref": "D24",
+        "name": "仪器仪表",
+        "definition": "以工业测量、环境监测、科学分析、计量等仪器仪表为核心产品的研发与制造活动，涵盖工业仪表、智能仪表、计量仪表等。"
+      }
+    ]
+  },
+  "output": {
+    "merge_groups": [
+      {
+        "direction_refs": [
+          "D4",
+          "D24"
+        ],
+        "name": "仪器仪表",
+        "definition": "以工业测量、环境监测、科学分析、计量等用途为核心的仪器仪表产品研发与制造活动，涵盖工业仪表、智能仪表、计量仪表及高可靠压力变送器等。"
+      }
+    ]
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "request_id": "chatcmpl-f89f3dce-aa87-9783-9059-82e0b8e9c2e8",
+      "usage": {
+        "completion_tokens": 66,
+        "completion_tokens_details": {
+          "text_tokens": 67
+        },
+        "prompt_tokens": 432,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "text_tokens": 432
+        },
+        "total_tokens": 498
+      }
+    }
+  ],
+  "request_id": "chatcmpl-f89f3dce-aa87-9783-9059-82e0b8e9c2e8"
+}

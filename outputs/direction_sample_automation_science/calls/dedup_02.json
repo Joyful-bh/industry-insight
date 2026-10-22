@@ -1,0 +1,47 @@
+{
+  "input": {
+    "directions": [
+      {
+        "direction_ref": "D6",
+        "name": "智能水表",
+        "definition": "具备远程抄表、通信、水质监测、泄漏报警等功能的智能水表产品研发与制造。"
+      },
+      {
+        "direction_ref": "D31",
+        "name": "智能水表",
+        "definition": "具备远程抄表、通信模块、水质监测、泄漏报警等功能的智能水表产品的研发与制造。"
+      }
+    ]
+  },
+  "output": {
+    "merge_groups": [
+      {
+        "direction_refs": [
+          "D6",
+          "D31"
+        ],
+        "name": "智能水表",
+        "definition": "具备远程抄表、通信、水质监测、泄漏报警等功能的智能水表产品研发与制造。"
+      }
+    ]
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "request_id": "chatcmpl-bf42bd79-1f1a-99c6-93c1-2d98bf91d5e4",
+      "usage": {
+        "completion_tokens": 50,
+        "completion_tokens_details": {
+          "text_tokens": 50
+        },
+        "prompt_tokens": 415,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "text_tokens": 415
+        },
+        "total_tokens": 465
+      }
+    }
+  ],
+  "request_id": "chatcmpl-bf42bd79-1f1a-99c6-93c1-2d98bf91d5e4"
+}

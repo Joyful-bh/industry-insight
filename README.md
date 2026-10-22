@@ -202,10 +202,14 @@ python -m track_insight stage2-status <plan-id>
 ```powershell
 python -m track_insight topic-build <plan-id>
 python -m track_insight topic-status <plan-id>
+python -m track_insight direction-build <plan-id>
+python -m track_insight direction-status <plan-id>
 python -m track_insight track-build <plan-id>
 python -m track_insight track-analyze <plan-id>
 python -m track_insight track-status <plan-id>
 ```
+
+`direction-build` 是新版 Topic→细分方向阶段：使用带重叠的语义分组，分组内由模型归并 Topic，最后只对跨组的明显重复方向做一次收口。该阶段当前独立运行，尚未替换旧 `track-build`。
 
 Topic 构建中断后可使用 `topic-build <plan-id> --resume` 继续。
 

@@ -1,0 +1,23 @@
+{
+  "selected_human_tracks": [
+    {
+      "id": "dtrack_industrial_automation_instruments",
+      "name": "工业自动化与智能检测装备",
+      "source_track_count": 15,
+      "topic_count": 87
+    },
+    {
+      "id": "dtrack_scientific_instruments_testing_equipment",
+      "name": "科学仪器与检测装备",
+      "source_track_count": 6,
+      "topic_count": 28
+    }
+  ],
+  "topic_count": 115,
+  "topic_unit_count": 115,
+  "group_topics": 80,
+  "overlap_ratio": 0.2,
+  "workers": 4,
+  "model": "deepseek-v4.1-flash",
+  "embedding_model": "text-embedding-v4"
+}
